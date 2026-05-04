@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    image: video-compression-agent:latest
+    container_name: video-compression-agent
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    # Reasonable shm size — ffmpeg + libvmaf can consume a chunk on long files
+    shm_size: 1gb

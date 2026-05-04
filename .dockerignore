@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.git/
+.github/
+.vscode/
+.idea/
+.cursor/
+.pytest_cache/
+.ruff_cache/
+
+# Runtime data — these live in the host volume mounts at run time
+uploads/
+outputs/
+bin/
+
+# Logs and stray artefacts from local runs
+server.log
+server.err.log
+*.vmaf.json
+*.av1.mkv
+*.tmp
+
+# OS clutter
+.DS_Store
+Thumbs.db

@@ -1,0 +1,47 @@
+# ── Python ────────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ── Project runtime data ─────────────────────────────────────────────────
+# Auto-vendored binaries (ab-av1.exe on Windows, ffmpeg/ffprobe/ab-av1 on
+# Linux). install.sh / app/tools.py recreate these on first run.
+bin/
+
+# User uploads + encoded outputs + libvmaf reports — ephemeral state, can
+# get large quickly.
+uploads/
+outputs/
+*.vmaf.json
+
+# Stray dirs created by a botched powershell redirection (e.g. `outputs;C/`)
+*;C/
+
+# ── Logs from local dev ──────────────────────────────────────────────────
+server.log
+server.err.log
+docker-build.log
+*.tmp
+
+# ── Editor / IDE ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Tool caches ──────────────────────────────────────────────────────────
+.claude/settings.local.json
+
+# ── OS clutter ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

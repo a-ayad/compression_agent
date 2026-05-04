@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<title>Video Compression Agent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.tailwindcss.com?plugins=forms"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          ink: { 950: '#070811', 900: '#0c0e1a', 800: '#161a2c', 700: '#1f2540', 600: '#2c3354' },
+          accent: { 400: '#7c8cf8', 500: '#5b6cf6', 600: '#4654d8' },
+        },
+        boxShadow: {
+          glow: '0 0 0 1px rgba(123,140,248,.25), 0 8px 30px -10px rgba(91,108,246,.45)',
+        },
+      },
+    },
+  };
+</script>
+<link rel="stylesheet" href="/static/style.css" />
+<style type="text/tailwindcss">
+  @layer components {
+    .card { @apply bg-ink-900/70 backdrop-blur-sm border border-white/5 rounded-2xl p-6 shadow-lg; }
+    .card-header { @apply flex flex-wrap items-center gap-x-3 gap-y-1 mb-5; }
+    .card-title  { @apply text-lg font-semibold; }
+    .card-sub    { @apply text-sm text-slate-400 w-full md:w-auto md:ml-auto; }
+
+    .step-pill { @apply inline-flex items-center justify-center w-7 h-7 rounded-full bg-accent-500/15 text-accent-400 text-xs font-semibold border border-accent-500/30; }
+
+    .dropzone { @apply rounded-2xl border-2 border-dashed border-white/10 bg-ink-800/40 px-6 py-12 text-center cursor-pointer hover:border-accent-500/50 hover:bg-ink-800/60 transition-colors duration-200; }
+    .dropzone.drag { @apply border-accent-500 bg-accent-500/10; }
+
+    .metric { @apply rounded-lg bg-ink-900/60 border border-white/5 p-4; }
+    .metric-label { @apply text-xs uppercase tracking-wider text-slate-400; }
+    .metric-value { @apply text-lg font-semibold mt-1; }
+    .metric-foot  { @apply text-xs mt-1; }
+
+    .big-metric { @apply rounded-xl bg-ink-900/60 border border-white/5 p-5 text-center; }
+    .big-metric-label { @apply text-xs uppercase tracking-wider text-slate-400 mb-1; }
+    .big-metric-value { @apply text-3xl font-bold tabular-nums; }
+
+    .progress-bar { @apply w-full h-2 bg-ink-800 rounded-full overflow-hidden border border-white/5; }
+    .progress-fill { @apply h-full bg-gradient-to-r from-accent-500 to-purple-400 rounded-full transition-[width] duration-300 ease-out; }
+
+    .comp-gauge { @apply w-full h-2.5 bg-ink-800 rounded-full overflow-hidden border border-white/5; }
+    .comp-fill  { @apply h-full rounded-full transition-[width] duration-500 ease-out; background: linear-gradient(90deg,#34d399 0%,#fbbf24 60%,#f97316 100%); }
+
+    .form-label { @apply block text-sm font-medium text-slate-300 mb-2; }
+
+    .btn-primary { @apply inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-accent-500 to-purple-500 text-white font-medium text-sm shadow-glow hover:brightness-110 active:scale-[0.99] transition disabled:opacity-40 disabled:cursor-not-allowed; }
+
+    .toggle-card { @apply rounded-lg border border-white/5 bg-ink-800/40 p-3 cursor-pointer hover:border-accent-500/40 transition; }
+    .toggle-card.active { @apply border-accent-500/70 bg-accent-500/10 shadow-glow; }
+    .toggle-card.disabled { @apply opacity-40 cursor-not-allowed pointer-events-none; }
+    .toggle-card-title { @apply text-sm font-medium; }
+    .toggle-card-sub   { @apply text-xs text-slate-400 mt-0.5 leading-snug; }
+
+    .chip { @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider; }
+    .chip-hw  { @apply bg-emerald-500/15 text-emerald-400 border border-emerald-500/25; }
+    .chip-sw  { @apply bg-blue-500/15 text-blue-400 border border-blue-500/25; }
+    .chip-rec { @apply bg-purple-500/15 text-purple-300 border border-purple-500/25; }
+    .chip-warn { @apply bg-amber-500/15 text-amber-400 border border-amber-500/25; }
+
+    .stage-strip { @apply flex items-center gap-1 sm:gap-3; }
+    .stage { @apply flex items-center gap-2 flex-1; }
+    .stage-dot { @apply w-2.5 h-2.5 rounded-full bg-ink-700 border border-white/10 transition; }
+    .stage-label { @apply text-xs text-slate-400 transition; }
+    .stage.active .stage-dot { @apply bg-accent-400 border-accent-400 animate-pulse; }
+    .stage.active .stage-label { @apply text-accent-400 font-medium; }
+    .stage.done .stage-dot { @apply bg-emerald-400 border-emerald-400; }
+    .stage.done .stage-label { @apply text-emerald-400; }
+  }
+  /* connector line between stages — tailwind doesn't render arbitrary ::after content easily */
+  .stage:not(:last-child)::after { content:''; flex:1 1 auto; height:1px; background:rgba(255,255,255,.10); }
+</style>
+<body class="min-h-screen bg-ink-950 text-slate-100 antialiased">
+
+<!-- Animated gradient background -->
+<div aria-hidden="true" class="fixed inset-0 overflow-hidden pointer-events-none -z-10">
+  <div class="absolute -top-40 -left-40 w-[40rem] h-[40rem] rounded-full bg-accent-500/15 blur-3xl"></div>
+  <div class="absolute top-40 -right-32 w-[36rem] h-[36rem] rounded-full bg-purple-500/10 blur-3xl"></div>
+  <div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-[60rem] h-[40rem] rounded-full bg-cyan-500/10 blur-3xl"></div>
+</div>
+
+<header class="max-w-6xl mx-auto px-6 pt-10 pb-6">
+  <div class="flex items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500 to-purple-500 flex items-center justify-center shadow-glow">
+        <svg viewBox="0 0 24 24" class="w-6 h-6 text-white" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+      </div>
+      <div>
+        <h1 class="text-xl font-semibold tracking-tight">Video Compression Agent</h1>
+        <p class="text-xs text-slate-400">VMAF-targeted encoding · ab-av1 + Av1an</p>
+      </div>
+    </div>
+    <div id="caps-badge" class="hidden md:flex items-center gap-2 text-xs">
+      <!-- Filled by JS -->
+    </div>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-6 pb-24 space-y-6">
+
+  <!-- Section 1: Upload -->
+  <section id="upload-section" class="card">
+    <div class="card-header">
+      <span class="step-pill">1</span>
+      <h2 class="card-title">Upload a video</h2>
+      <p class="card-sub">Any container/codec ffmpeg can read (mp4, mkv, mov, avi, webm, etc.)</p>
+    </div>
+    <div id="dropzone" class="dropzone">
+      <input id="file-input" type="file" accept="video/*" class="hidden" />
+      <div class="flex flex-col items-center gap-3">
+        <svg class="w-12 h-12 text-accent-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <div class="text-base font-medium">Drop a video here, or <span class="text-accent-400 underline cursor-pointer" id="browse-btn">browse</span></div>
+        <div class="text-xs text-slate-400">Files stay on your machine — nothing is sent to a third party.</div>
+      </div>
+    </div>
+    <div id="upload-progress" class="hidden mt-4">
+      <div class="text-sm text-slate-300 mb-2"><span id="upload-progress-label">Uploading…</span></div>
+      <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill" style="width:0%"></div></div>
+    </div>
+  </section>
+
+  <!-- Section 2: Analysis -->
+  <section id="analysis-section" class="card hidden">
+    <div class="card-header">
+      <span class="step-pill">2</span>
+      <h2 class="card-title">Analysis</h2>
+      <p class="card-sub" id="analysis-sub">Compressibility & recommendation</p>
+    </div>
+    <div class="grid md:grid-cols-3 gap-4">
+      <div class="metric">
+        <div class="metric-label">Source codec</div>
+        <div id="m-codec" class="metric-value">—</div>
+        <div id="m-container" class="metric-foot text-slate-400">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Resolution & FPS</div>
+        <div id="m-res" class="metric-value">—</div>
+        <div id="m-duration" class="metric-foot text-slate-400">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Bitrate</div>
+        <div id="m-bitrate" class="metric-value">—</div>
+        <div id="m-bpp" class="metric-foot text-slate-400">—</div>
+      </div>
+    </div>
+
+    <div class="mt-4 p-4 rounded-lg bg-ink-900/60 border border-white/5">
+      <div class="flex items-center justify-between gap-4 mb-2">
+        <div class="text-sm text-slate-300">Compressibility</div>
+        <div id="m-comp-label" class="text-sm font-medium">—</div>
+      </div>
+      <div class="comp-gauge"><div id="m-comp-fill" class="comp-fill" style="width:0%"></div></div>
+      <p id="m-verdict" class="mt-3 text-sm text-slate-300 leading-relaxed">—</p>
+    </div>
+
+    <div class="mt-4 p-4 rounded-lg bg-gradient-to-br from-accent-500/10 to-purple-500/10 border border-accent-500/20">
+      <div class="flex items-start gap-3">
+        <div class="shrink-0 w-9 h-9 rounded-lg bg-accent-500/20 flex items-center justify-center">
+          <svg viewBox="0 0 24 24" class="w-5 h-5 text-accent-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div>
+          <div class="text-xs uppercase tracking-wider text-accent-400 font-medium">Recommendation</div>
+          <div id="m-rec-title" class="text-base font-semibold mt-0.5">—</div>
+          <p id="m-rec-reason" class="text-sm text-slate-300 leading-relaxed mt-1">—</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 3: Encoding controls -->
+  <section id="controls-section" class="card hidden">
+    <div class="card-header">
+      <span class="step-pill">3</span>
+      <h2 class="card-title">Compression settings</h2>
+      <p class="card-sub">Pick a backend, encoder, and target quality</p>
+    </div>
+
+    <div class="space-y-5">
+      <!-- Backend toggle -->
+      <div>
+        <label class="form-label">Backend</label>
+        <div id="backend-toggle" class="grid grid-cols-2 gap-2 max-w-md">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+
+      <!-- Encoder grid -->
+      <div>
+        <label class="form-label">Encoder</label>
+        <div id="encoder-grid" class="grid sm:grid-cols-2 gap-2">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+
+      <!-- VMAF target -->
+      <div>
+        <label class="form-label">Target VMAF</label>
+        <div id="vmaf-toggle" class="grid grid-cols-3 gap-2 max-w-2xl">
+          <!-- Filled by JS -->
+        </div>
+      </div>
+
+      <!-- Av1an workers (conditional) -->
+      <div id="workers-row" class="hidden">
+        <label class="form-label">Parallel workers <span id="workers-val" class="text-accent-400 font-medium">auto</span></label>
+        <input id="workers-slider" type="range" min="1" max="16" value="6" class="w-full max-w-md accent-accent-500" />
+        <p class="text-xs text-slate-400 mt-1">Av1an splits the video into scenes and encodes them in parallel.</p>
+      </div>
+
+      <button id="encode-btn" class="btn-primary w-full md:w-auto" disabled>
+        <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Compress
+      </button>
+    </div>
+  </section>
+
+  <!-- Section 4: Progress -->
+  <section id="progress-section" class="card hidden">
+    <div class="card-header">
+      <span class="step-pill">4</span>
+      <h2 class="card-title">Encoding</h2>
+      <p class="card-sub" id="progress-sub">In progress…</p>
+    </div>
+
+    <div class="space-y-4">
+      <div class="stage-strip">
+        <div class="stage" data-stage="searching"><span class="stage-dot"></span><div class="stage-label">Searching CRF</div></div>
+        <div class="stage" data-stage="encoding"><span class="stage-dot"></span><div class="stage-label">Encoding</div></div>
+        <div class="stage" data-stage="measuring"><span class="stage-dot"></span><div class="stage-label">Measuring VMAF</div></div>
+        <div class="stage" data-stage="done"><span class="stage-dot"></span><div class="stage-label">Done</div></div>
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
+          <span id="progress-msg">Initializing…</span>
+          <span id="progress-pct">0%</span>
+        </div>
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill" style="width:0%"></div></div>
+      </div>
+
+      <details class="bg-ink-900/40 rounded-lg p-3 border border-white/5">
+        <summary class="text-sm text-slate-300 cursor-pointer select-none">Encoder log</summary>
+        <pre id="progress-log" class="mt-2 text-xs text-slate-400 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono leading-snug"></pre>
+      </details>
+    </div>
+  </section>
+
+  <!-- Section 5: Result -->
+  <section id="result-section" class="card hidden">
+    <div class="card-header">
+      <span class="step-pill">5</span>
+      <h2 class="card-title">Comparison</h2>
+      <p class="card-sub" id="result-sub">—</p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-3 mb-4">
+      <div class="big-metric">
+        <div class="big-metric-label">File size reduction</div>
+        <div id="r-savings" class="big-metric-value text-emerald-400">—</div>
+        <div id="r-sizes" class="text-xs text-slate-400 mt-1">—</div>
+      </div>
+      <div class="big-metric">
+        <div class="big-metric-label">Achieved VMAF</div>
+        <div id="r-vmaf" class="big-metric-value">—</div>
+        <div id="r-vmaf-target" class="text-xs text-slate-400 mt-1">—</div>
+      </div>
+      <div class="big-metric">
+        <div class="big-metric-label">Encode time</div>
+        <div id="r-time" class="big-metric-value">—</div>
+        <div id="r-encoder" class="text-xs text-slate-400 mt-1">—</div>
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <div>
+        <div class="text-xs uppercase tracking-wider text-slate-400 mb-2">Original</div>
+        <video id="v-original" controls class="w-full rounded-lg bg-black"></video>
+        <div id="r-orig-meta" class="text-xs text-slate-400 mt-1">—</div>
+      </div>
+      <div>
+        <div class="text-xs uppercase tracking-wider text-accent-400 mb-2">Re-encoded</div>
+        <video id="v-encoded" controls class="w-full rounded-lg bg-black"></video>
+        <div class="flex items-center justify-between text-xs text-slate-400 mt-1">
+          <span id="r-enc-meta">—</span>
+          <a id="r-download" class="text-accent-400 hover:underline" href="#" download>Download ↓</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="text-center text-xs text-slate-500 pt-8">
+    Built on FFmpeg · ab-av1 · Av1an · libvmaf
+  </footer>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

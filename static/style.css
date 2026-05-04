@@ -1,0 +1,15 @@
+/* Plain CSS used outside Tailwind's @apply scope. Most styling lives in the
+   Tailwind utility classes inside index.html and the `<style type="text/tailwindcss">`
+   block in there. Keep this file for animations / things that don't fit utilities. */
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { animation: spin 0.8s linear infinite; }
+
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: 0 0; }
+}
+.progress-fill {
+  background-size: 200% 100%;
+  animation: shimmer 2s linear infinite;
+}
