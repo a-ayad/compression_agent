@@ -1,0 +1,243 @@
+# syntax=docker/dockerfile:1.6
+#
+# CUDA-accelerated VMAF service.
+#
+# Builds libvmaf with CUDA feature extractors enabled, then ffmpeg with
+# --enable-libvmaf. ffmpeg's configure auto-detects the CUDA-capable
+# libvmaf and registers the `libvmaf_cuda` filter.
+#
+# Why we build instead of reusing the av1an container's ffmpeg:
+#   - The Arch `vmaf` package is built with -Denable_cuda=false. Without
+#     a CUDA-built libvmaf, ffmpeg will not register the libvmaf_cuda
+#     filter even when --enable-libvmaf is on.
+#   - We don't want to monkeypatch the av1an image; this service is
+#     focused on measurement and only needs decoders + libvmaf, not the
+#     full encoder kitchen sink.
+#
+# The final image is ~2.5GB (CUDA runtime + ffmpeg + libvmaf + Python).
+
+ARG CUDA_VERSION=12.8.2
+ARG UBUNTU_VERSION=24.04
+
+# ──────────────────────────────────────────────────────────────────────────
+# Stage 1: builder — full CUDA toolkit, builds libvmaf + ffmpeg from source
+# ──────────────────────────────────────────────────────────────────────────
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
+
+ARG VMAF_VERSION=v3.0.0
+ARG FFMPEG_VERSION=n7.1.1
+ARG NV_HEADERS_VERSION=n13.0.19.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH=/usr/local/cuda/bin:$PATH
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig
+# libvmaf links against the CUDA driver API (-lcuda). At build time we
+# only have the stub at /usr/local/cuda/lib64/stubs/libcuda.so; the real
+# driver is injected at runtime by the nvidia container runtime. Adding
+# the stub dir to LIBRARY_PATH lets the linker find -lcuda; LDFLAGS is
+# *not* set globally because it breaks ffmpeg's configure-time probes
+# that link tiny test programs without needing libcuda.
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl git pkg-config \
+        meson ninja-build nasm yasm cmake xxd \
+        python3 python3-pip \
+        libssl-dev zlib1g-dev libdrm-dev \
+        libdav1d-dev libx264-dev libx265-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# nv-codec-headers — supplies <ffnvcodec/...> headers used by ffmpeg's
+# nvenc/nvdec/cuvid wrappers. No runtime artifacts; install-only.
+RUN git clone --depth 1 --branch ${NV_HEADERS_VERSION} \
+        https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv \
+ && make -C /tmp/nv install \
+ && rm -rf /tmp/nv
+
+# libvmaf with CUDA. -Denable_cuda=true wires up the CUDA feature
+# extractors (vmaf_cuda_state, the integer_motion/vif/adm CUDA kernels).
+# nvcc_args passes our gencode list so the .ptx is built for the arches
+# we care about.
+RUN git clone --depth 1 --branch ${VMAF_VERSION} \
+        https://github.com/Netflix/vmaf.git /tmp/vmaf \
+ && cd /tmp/vmaf/libvmaf \
+    # libvmaf's meson.build invokes nvcc in two places:
+    #   1. cu_ptx_target_X custom_targets (--ptx mode) for kernel .ptx
+    #   2. cuda_static_lib (cuda_args: cuda_flags) for the .cu glue
+    # Both default to compute_52 SASS/PTX. We patch both to target
+    # sm_75 — the oldest arch nvcc 12.8 still supports without
+    # deprecation warnings; the runtime driver JITs sm_75 PTX forward
+    # to any newer arch (Ampere/Hopper/Blackwell).
+ && find . -name meson.build -exec \
+        sed -i \
+          -e "s|'--ptx',|'-arch=sm_75', '--ptx',|g" \
+          -e "s|cuda_flags = \[\]|cuda_flags = ['-arch=sm_75']|g" \
+          {} + \
+    # `xxd --include` emits a C unsigned char array sized exactly to the
+    # input file, with NO trailing null. libvmaf calls cuModuleLoadData
+    # on the array, treating it as a C string — so the parser walks past
+    # the array end into whatever bytes happen to follow it in the .data
+    # section, and ptxas trips on "Unexpected non-ASCII character".
+    # Shadow xxd with a wrapper that appends \0 to the input before
+    # delegating; meson's find_program('xxd') resolves PATH-first.
+ && mkdir -p /usr/local/libexec/xxd-wrap \
+ && printf '%s\n' \
+        '#!/bin/sh' \
+        '# Wrapper for xxd that null-terminates the input before --include' \
+        '# embeds it. We append \\0 to the .ptx in-place rather than to a' \
+        '# temp copy so xxd still derives the C array name from the same' \
+        '# input path (libvmaf references e.g. src_motion_score_ptx).' \
+        'if [ "$1" = "--include" ] && [ -n "$2" ] && [ -f "$2" ]; then' \
+        '    case "$2" in' \
+        '        *.ptx)' \
+        '            tail_byte=$(tail -c1 "$2" | od -An -tx1 | tr -d " ")' \
+        '            [ "$tail_byte" = "00" ] || printf "\\0" >> "$2"' \
+        '            ;;' \
+        '    esac' \
+        'fi' \
+        'exec /usr/bin/xxd "$@"' \
+        > /usr/local/libexec/xxd-wrap/xxd \
+ && chmod +x /usr/local/libexec/xxd-wrap/xxd \
+ && export PATH=/usr/local/libexec/xxd-wrap:$PATH \
+ && LDFLAGS="-L/usr/local/cuda/lib64/stubs -lcuda" \
+    meson setup build \
+        --buildtype=release \
+        --default-library=shared \
+        --prefix=/usr/local \
+        -Denable_cuda=true \
+        -Denable_avx512=true \
+        -Dbuilt_in_models=true \
+ && LDFLAGS="-L/usr/local/cuda/lib64/stubs -lcuda" \
+    ninja -C build install \
+ && ldconfig \
+ && mkdir -p /usr/local/share/vmaf/model \
+ && cp -r /tmp/vmaf/model/* /usr/local/share/vmaf/model/ \
+ && rm -rf /tmp/vmaf \
+ # libvmaf 3.0 ships a single libvmaf.pc, but ffmpeg's configure probes
+ # for a SEPARATE libvmaf_cuda.pc (`check_pkg_config libvmaf_cuda ...`)
+ # to decide whether to register the libvmaf_cuda filter. Without it,
+ # the filter is silently disabled. We synthesise the missing .pc here
+ # so it points at libvmaf and adds the CUDA driver stub for linking.
+ # Runtime resolution of libcuda.so.1 is provided by the nvidia
+ # container runtime injecting the host driver.
+ && VMAF_PC_DIR="$(ls -d /usr/local/lib/x86_64-linux-gnu/pkgconfig 2>/dev/null \
+                 || ls -d /usr/local/lib/pkgconfig)" \
+ && printf '%s\n' \
+        'prefix=/usr/local' \
+        'exec_prefix=${prefix}' \
+        'libdir=${prefix}/lib/x86_64-linux-gnu' \
+        'includedir=${prefix}/include' \
+        '' \
+        'Name: libvmaf_cuda' \
+        'Description: VMAF with CUDA-accelerated feature extractors' \
+        'Version: 3.0.0' \
+        'Requires: libvmaf' \
+        'Libs: -L/usr/local/cuda/lib64/stubs -lcuda' \
+        'Cflags: -I${includedir} -I${includedir}/libvmaf' \
+    > "$VMAF_PC_DIR/libvmaf_cuda.pc" \
+ && (grep -q -- '-lcuda' "$VMAF_PC_DIR/libvmaf.pc" \
+     || sed -i 's|^Libs:.*|& -L/usr/local/cuda/lib64/stubs -lcuda|' "$VMAF_PC_DIR/libvmaf.pc")
+
+# ffmpeg. We deliberately keep this lean — encoders aren't needed for
+# measurement, only decoders + libvmaf + cuda. libx264/x265 are kept so
+# the same image can be poked at interactively for sanity checks.
+RUN git clone --depth 1 --branch ${FFMPEG_VERSION} \
+        https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
+ && cd /tmp/ffmpeg \
+    # ffmpeg's libvmaf pkg-config probe links a tiny test program against
+    # libvmaf.so. Because libvmaf.so has unresolved CUDA driver-API
+    # symbols, we have to feed the linker the stub path + -lcuda via
+    # --extra-ldflags / --extra-libs so the probe (and later, ffmpeg
+    # itself) can link.
+ && ( ./configure \
+        --prefix=/usr/local \
+        --extra-cflags="-I/usr/local/cuda/include" \
+        --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/cuda/lib64/stubs" \
+        --extra-libs="-lpthread -lm -lcuda" \
+        --enable-gpl \
+        --enable-nonfree \
+        --enable-shared \
+        --disable-static \
+        --disable-debug --disable-doc \
+        --enable-libvmaf \
+        --enable-libdav1d \
+        --enable-libx264 --enable-libx265 \
+        --enable-cuda-nvcc \
+        --enable-cuvid --enable-nvdec --enable-nvenc \
+        --enable-ffnvcodec \
+     || { echo "=== ffbuild/config.log tail ==="; tail -150 ffbuild/config.log; exit 1; } ) \
+ && make -j"$(nproc)" \
+ && make install \
+ && ldconfig \
+ && rm -rf /tmp/ffmpeg
+
+# Sanity: confirm libvmaf_cuda was registered. `ffmpeg -filters` needs
+# libcuda.so.1, which only exists at runtime (injected by the nvidia
+# container runtime), so we can't run ffmpeg here. Instead check the
+# compiled-in filter table by grepping libavfilter.so for the filter
+# name string. Fail the build if missing — the whole point of this
+# image is the CUDA path.
+RUN apt-get update && apt-get install -y --no-install-recommends binutils \
+ && rm -rf /var/lib/apt/lists/* \
+ && AVFILTER="$(ls /usr/local/lib/libavfilter.so.* 2>/dev/null | head -1)" \
+ && if [ -n "$AVFILTER" ] && strings "$AVFILTER" | grep -q '^libvmaf_cuda$'; then \
+        echo "OK: libvmaf_cuda filter compiled into $AVFILTER"; \
+    else \
+        echo "ERROR: libvmaf_cuda filter not registered in $AVFILTER" >&2; \
+        echo "--- libvmaf headers installed:" >&2; \
+        ls /usr/local/include/libvmaf/ >&2; \
+        echo "--- vmaf_cuda symbols in libvmaf.so:" >&2; \
+        nm -D /usr/local/lib/x86_64-linux-gnu/libvmaf.so 2>/dev/null \
+            | awk '$2=="T"{print $3}' | grep ^vmaf_cuda >&2; \
+        exit 1; \
+    fi
+
+# ──────────────────────────────────────────────────────────────────────────
+# Stage 2: runtime — CUDA runtime + ffmpeg + Python service
+# ──────────────────────────────────────────────────────────────────────────
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS app
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH=/usr/local/cuda/bin:/usr/local/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+
+# Runtime libs only — must mirror what we linked against in the builder.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates tini \
+        python3 python3-pip \
+        libdav1d7 libx264-164 libx265-199 \
+        libdrm2 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pull in the built ffmpeg + libvmaf from the builder. We copy the whole
+# /usr/local because ffmpeg's shared libs (libav*) plus libvmaf land
+# under /usr/local/{bin,lib,share}.
+COPY --from=builder /usr/local/bin/ffmpeg   /usr/local/bin/ffmpeg
+COPY --from=builder /usr/local/bin/ffprobe  /usr/local/bin/ffprobe
+COPY --from=builder /usr/local/lib/         /usr/local/lib/
+COPY --from=builder /usr/local/share/vmaf   /usr/local/share/vmaf
+RUN ldconfig
+
+WORKDIR /app
+COPY vmaf-service/requirements.txt /app/
+RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
+
+COPY vmaf-service/service.py     /app/service.py
+COPY vmaf-service/vmaf_runner.py /app/vmaf_runner.py
+COPY vmaf-service/static/        /app/static/
+
+# Working dirs — shared with the main app via a bind/named volume so we
+# can be handed paths instead of file uploads.
+RUN mkdir -p /work
+ENV VMAF_WORK_DIR=/work \
+    VMAF_MODEL_DIR=/usr/local/share/vmaf/model
+
+EXPOSE 8001
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python3", "-m", "uvicorn", "service:app", "--host", "0.0.0.0", "--port", "8001"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=3)" \
+        || exit 1

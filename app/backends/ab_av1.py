@@ -14,7 +14,7 @@ from typing import Optional
 
 from ..progress import JobEvent, JobState
 from ..tools import get_capabilities
-from .base import Backend, EncodeRequest
+from .base import Backend, EncodeRequest, predictor_target
 
 
 # Regex patterns to match ab-av1 stderr (which mixes its own messages with
@@ -51,16 +51,34 @@ class AbAv1Backend:
     def _build_command(self, req: EncodeRequest, duration_s: float) -> list[str]:
         caps = get_capabilities()
         enc = req.encoder
+        # ab-av1's --min-vmaf drives sample-encode probing, which is
+        # systematically optimistic vs an honest full-clip libvmaf
+        # measurement. Aim a few points higher so the post-encode
+        # measurement (app/vmaf.py) lands on the user's actual target.
+        probe_vmaf = predictor_target(req.target_vmaf, enc)
         cmd = [
             caps.ab_av1,
             "auto-encode",
             "-i", req.input_path,
             "-o", req.output_path,
-            "-e", enc.id,
-            "--min-vmaf", f"{req.target_vmaf:.1f}",
+            "-e", enc.real_encoder,
+            "--min-vmaf", f"{probe_vmaf:.1f}",
             "--max-encoded-percent", "100",  # don't fail just because file isn't smaller
         ]
-        cmd.extend(enc.ab_av1_extra)
+        # Apply preset override (UI slider) if provided. ab_av1_extra is a
+        # flat list like ["--preset", "4", ...]; we substitute the value
+        # immediately after a "--preset" entry.
+        extra = list(enc.ab_av1_extra)
+        preset_override = req.extra_options.get("encoder_preset")
+        if preset_override is not None:
+            try:
+                idx = extra.index("--preset")
+                extra[idx + 1] = str(int(preset_override))
+            except (ValueError, IndexError):
+                pass
+        cmd.extend(extra)
+        if enc.pre_filter:
+            cmd.extend(["--vfilter", enc.pre_filter])
 
         # ab-av1's auto-encode default keyint is 10s if input > 3min — fine.
         # For very short clips force at least 2 samples to get a sensible CRF.
@@ -82,9 +100,14 @@ class AbAv1Backend:
         duration_s = info.duration_s
 
         cmd = self._build_command(req, duration_s)
+        probe_vmaf = predictor_target(req.target_vmaf, req.encoder)
         await job.emit(JobEvent(
             type="log", stage="searching",
-            message=f"Launching ab-av1 with encoder {req.encoder.id} (target VMAF {req.target_vmaf})",
+            message=(
+                f"Launching ab-av1 with encoder {req.encoder.id} "
+                f"(user target VMAF {req.target_vmaf:g}; probe target {probe_vmaf:.1f} "
+                f"to compensate for predictor inflation)"
+            ),
             data={"command": " ".join(f'"{c}"' if " " in c else c for c in cmd)},
         ))
         await job.emit(JobEvent(

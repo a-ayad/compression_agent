@@ -10,6 +10,7 @@ const state = {
   selectedEncoder: null,   // encoder id
   selectedVmaf: 90,
   workers: null,
+  svtPresetOverride: null,  // user override of SVT-AV1 final preset
   encoders: [],
   backends: [],
   jobId: null,
@@ -117,9 +118,13 @@ function renderEncoderGrid() {
     const reason = !available ? e.unavailable_reason : (!allowed ? `Not supported by ${state.selectedBackend}` : '');
     const chips = [
       e.type === 'hw' ? '<span class="chip chip-hw">HW</span>' : '<span class="chip chip-sw">SW</span>',
+      e.pre_filter ? '<span class="chip chip-warn" title="Applies a pre-encode video filter (e.g. denoise/sharpen) before compression — bakes in a perceptual trade.">pre-filtered</span>' : '',
       isRec ? '<span class="chip chip-rec">recommended</span>' : '',
       disabled ? `<span class="chip chip-warn">unavailable</span>` : '',
     ].filter(Boolean).join('');
+    const notes = e.notes
+      ? `<div class="text-[11px] text-amber-300/80 mt-1">⚠ ${e.notes}</div>`
+      : '';
     return `
       <div class="toggle-card ${isActive ? 'active' : ''} ${disabled ? 'disabled' : ''}" data-encoder="${e.id}">
         <div class="flex items-center justify-between gap-2">
@@ -127,22 +132,71 @@ function renderEncoderGrid() {
           <div class="flex gap-1">${chips}</div>
         </div>
         <div class="toggle-card-sub">${e.description || ''}${reason ? `<br><span class="text-amber-400">${reason}</span>` : ''}</div>
+        ${notes}
       </div>`;
   }).join('');
   $('#encoder-grid').innerHTML = html;
 
   $$('#encoder-grid .toggle-card').forEach(el => {
     el.addEventListener('click', () => {
-      if (el.classList.contains('disabled')) return;
-      state.selectedEncoder = el.dataset.encoder;
+      const id = el.dataset.encoder;
+      const enc = state.encoders.find(x => x.id === id);
+      if (!enc || !enc.available) return;
+      // Auto-switch backend if the current one can't drive this preset
+      // (e.g. tiny presets are av1an-only because they need 2-pass).
+      if (!enc.backends.includes(state.selectedBackend)) {
+        const newBackend = (state.backends.find(
+          b => enc.backends.includes(b.name) && b.available
+        ) || {}).name;
+        if (newBackend) {
+          state.selectedBackend = newBackend;
+          renderBackendToggle();
+        } else {
+          return;  // no available backend for this preset
+        }
+      }
+      state.selectedEncoder = id;
+      // Auto-snap target VMAF when the encoder declares a recommended one
+      // (e.g. delivery presets that only make sense at low VMAF targets).
+      if (enc.recommended_vmaf_target != null) {
+        state.selectedVmaf = enc.recommended_vmaf_target;
+        renderVmafToggle();
+      }
+      // Show / hide the SVT-AV1 preset slider and reset it to the
+      // encoder's default whenever a new encoder is picked.
+      renderSvtPresetSlider();
       renderEncoderGrid();
       updateEncodeBtn();
     });
   });
 }
 
+const SVT_PRESET_BLURBS = {
+  2: 'placebo',
+  3: 'very slow',
+  4: 'slow (default)',
+  5: "HandBrake 'Fast'",
+  6: 'medium',
+  7: 'medium-fast',
+  8: 'fast (probe default)',
+};
+function renderSvtPresetSlider() {
+  const enc = state.encoders.find(e => e.id === state.selectedEncoder);
+  const isSvt = enc && enc.av1an_encoder === 'svt-av1';
+  const row = $('#svt-preset-row');
+  if (!isSvt) { row.classList.add('hidden'); state.svtPresetOverride = null; return; }
+  const defaultPreset = parseInt(enc.preset, 10) || 4;
+  state.svtPresetOverride = defaultPreset;
+  const slider = $('#svt-preset-slider');
+  slider.value = defaultPreset;
+  $('#svt-preset-val').textContent = defaultPreset;
+  $('#svt-preset-blurb').textContent = SVT_PRESET_BLURBS[defaultPreset] || '';
+  row.classList.remove('hidden');
+}
+
 function renderVmafToggle() {
   const targets = state.caps.vmaf_targets || [
+    { value: 80, label: 'VMAF 80', blurb: 'Tiny' },
     { value: 85, label: 'VMAF 85', blurb: 'Good' },
     { value: 90, label: 'VMAF 90', blurb: 'Very good' },
     { value: 95, label: 'VMAF 95', blurb: 'Excellent' },
@@ -187,6 +241,11 @@ function doUpload(file) {
   $('#upload-progress').classList.remove('hidden');
   $('#upload-progress-label').textContent = `Uploading "${file.name}" (${fmtBytes(file.size)})…`;
   $('#upload-progress-fill').style.width = '0%';
+  // Hide any previous preview while a new upload is in flight.
+  $('#upload-preview').classList.add('hidden');
+  const previewVid = $('#upload-preview-video');
+  previewVid.removeAttribute('src');
+  previewVid.load();
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/upload', true);
@@ -201,6 +260,19 @@ function doUpload(file) {
       const j = JSON.parse(xhr.responseText);
       state.upload = { upload_id: j.upload_id, info: j.info };
       $('#upload-progress-label').textContent = `Uploaded: ${file.name}`;
+      // Show a small preview of the uploaded clip so the user can confirm
+      // it played correctly before kicking off a multi-minute encode.
+      const pv = $('#upload-preview-video');
+      pv.src = `/api/file/upload/${j.upload_id}`;
+      pv.load();
+      $('#upload-preview-name').textContent = file.name;
+      const info = j.info || {};
+      const dims = (info.width && info.height) ? `${info.width}×${info.height}` : '';
+      const fps = info.fps ? `${(+info.fps).toFixed(2)} fps` : '';
+      const dur = info.duration_s ? `${(+info.duration_s).toFixed(1)}s` : '';
+      $('#upload-preview-meta').textContent =
+        [info.codec, dims, fps, dur, fmtBytes(file.size)].filter(Boolean).join(' · ');
+      $('#upload-preview').classList.remove('hidden');
       renderAnalysis(j.info);
       $('#analysis-section').classList.remove('hidden');
       $('#controls-section').classList.remove('hidden');
@@ -256,6 +328,13 @@ $('#workers-slider').addEventListener('input', (e) => {
   $('#workers-val').textContent = `${state.workers} workers`;
 });
 
+$('#svt-preset-slider').addEventListener('input', (e) => {
+  const v = parseInt(e.target.value, 10);
+  state.svtPresetOverride = v;
+  $('#svt-preset-val').textContent = v;
+  $('#svt-preset-blurb').textContent = SVT_PRESET_BLURBS[v] || '';
+});
+
 async function startEncode() {
   if (!state.upload || !state.selectedEncoder) return;
   $('#encode-btn').disabled = true;
@@ -273,6 +352,9 @@ async function startEncode() {
     target_vmaf: state.selectedVmaf,
     workers: state.workers,
   };
+  if (state.svtPresetOverride != null) {
+    body.encoder_preset = state.svtPresetOverride;
+  }
   const r = await fetch('/api/encode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -293,9 +375,9 @@ function resetProgressUi() {
   $('#progress-fill').style.width = '0%';
   $('#progress-pct').textContent = '0%';
   $('#progress-msg').textContent = 'Initializing…';
-  $('#progress-log').textContent = '';
   $$('.stage').forEach(s => s.classList.remove('active','done'));
   $('.stage[data-stage="searching"]').classList.add('active');
+  resetEncodeStats();
 }
 
 function openProgressStream(jobId) {
@@ -331,7 +413,9 @@ function openProgressStream(jobId) {
 
 function handleEvent(ev) {
   if (ev.type === 'log') {
-    appendLog(ev.message);
+    const kind = ev.data && ev.data.kind;
+    appendLog(ev.message, kind);
+    if (kind) updateStatsFromEvent(kind, ev.data);
   }
   if (ev.type === 'progress' || ev.type === 'stage') {
     if (ev.percent != null) {
@@ -369,10 +453,128 @@ function updateStageStrip(stage) {
   });
 }
 
-function appendLog(msg) {
+// Color map for parsed event kinds → tailwind text colors.
+const LOG_KIND_COLORS = {
+  input_info:  'text-cyan-300',
+  scene_info:  'text-cyan-300',
+  tq_probes:   'text-violet-300',
+  tq_target:   'text-emerald-300',
+  chunk_start: 'text-slate-400',
+  chunk_done:  'text-emerald-400',
+  phase:       'text-fuchsia-300',
+  warn:        'text-amber-300',
+};
+
+function appendLog(msg, kind) {
   const el = $('#progress-log');
-  el.textContent += msg + '\n';
+  const color = (kind && LOG_KIND_COLORS[kind]) || 'text-slate-400';
+  const span = document.createElement('span');
+  span.className = color;
+  span.textContent = msg + '\n';
+  el.appendChild(span);
   el.scrollTop = el.scrollHeight;
+  state.encodeStats = state.encodeStats || { logCount: 0 };
+  state.encodeStats.logCount += 1;
+  $('#log-line-count').textContent = `(${state.encodeStats.logCount} lines)`;
+}
+
+function resetEncodeStats() {
+  state.encodeStats = {
+    logCount: 0,
+    chunks: {},   // { chunkId: { q, predicted_vmaf, frames, fps, seconds } }
+    chunksTotal: null,
+    encStart: performance.now(),
+  };
+  $('#encode-stats').classList.add('hidden');
+  $('#es-input').textContent = '—';
+  $('#es-input-sub').textContent = '—';
+  $('#es-scenes').textContent = '—';
+  $('#es-scenes-sub').textContent = '—';
+  $('#es-chunks').textContent = '0 / —';
+  $('#es-chunks-sub').textContent = 'avg — fps';
+  $('#es-crfs').textContent = '—';
+  $('#es-crfs-sub').textContent = 'predicted VMAF';
+  $('#es-chunk-list').innerHTML = '';
+  $('#log-line-count').textContent = '';
+  const log = $('#progress-log');
+  if (log) log.innerHTML = '';
+}
+
+function updateStatsFromEvent(kind, data) {
+  const stats = state.encodeStats;
+  if (!stats) return;
+  $('#encode-stats').classList.remove('hidden');
+
+  if (kind === 'input_info') {
+    $('#es-input').textContent = `${data.width}×${data.height}`;
+    $('#es-input-sub').textContent = `${data.fps.toFixed(2)} fps`;
+  }
+  if (kind === 'scene_info') {
+    stats.chunksTotal = data.chunks;
+    $('#es-scenes').textContent = `${data.scenes} scene${data.scenes === 1 ? '' : 's'}`;
+    $('#es-scenes-sub').textContent = `${data.chunks} chunk${data.chunks === 1 ? '' : 's'}`;
+    refreshChunkProgress();
+  }
+  if (kind === 'tq_target') {
+    const c = stats.chunks[data.chunk] = stats.chunks[data.chunk] || {};
+    c.q = data.q;
+    c.predicted_vmaf = data.predicted_vmaf;
+    refreshCrfSummary();
+    refreshChunkList();
+  }
+  if (kind === 'chunk_start') {
+    const c = stats.chunks[data.chunk] = stats.chunks[data.chunk] || {};
+    c.startedAt = performance.now();
+    c.frames = data.frames;
+    refreshChunkList();
+  }
+  if (kind === 'chunk_done') {
+    const c = stats.chunks[data.chunk] = stats.chunks[data.chunk] || {};
+    c.frames = data.frames;
+    c.fps = data.fps;
+    c.seconds = data.seconds;
+    c.done = true;
+    refreshChunkProgress();
+    refreshChunkList();
+  }
+  if (kind === 'phase' && data.phase === 'concat') {
+    refreshChunkList();
+  }
+}
+
+function refreshChunkProgress() {
+  const stats = state.encodeStats;
+  const done = Object.values(stats.chunks).filter(c => c.done).length;
+  const total = stats.chunksTotal != null ? stats.chunksTotal : Object.keys(stats.chunks).length;
+  $('#es-chunks').textContent = `${done} / ${total}`;
+  const fpsList = Object.values(stats.chunks).filter(c => c.fps).map(c => c.fps);
+  if (fpsList.length) {
+    const avg = fpsList.reduce((a, b) => a + b, 0) / fpsList.length;
+    $('#es-chunks-sub').textContent = `avg ${avg.toFixed(1)} fps per chunk`;
+  }
+}
+
+function refreshCrfSummary() {
+  const stats = state.encodeStats;
+  const targets = Object.values(stats.chunks).filter(c => c.q != null);
+  if (!targets.length) return;
+  const qs = targets.map(c => c.q).sort((a, b) => a - b);
+  const minQ = qs[0], maxQ = qs[qs.length - 1];
+  const avgVmaf = targets.reduce((s, c) => s + c.predicted_vmaf, 0) / targets.length;
+  $('#es-crfs').textContent = minQ === maxQ ? `CRF ${minQ}` : `CRF ${minQ}-${maxQ}`;
+  $('#es-crfs-sub').textContent = `pred VMAF ${avgVmaf.toFixed(2)} (${targets.length} chunk${targets.length === 1 ? '' : 's'})`;
+}
+
+function refreshChunkList() {
+  const stats = state.encodeStats;
+  const items = Object.entries(stats.chunks).sort((a, b) => +a[0] - +b[0]);
+  $('#es-chunk-list').innerHTML = items.map(([id, c]) => {
+    const status = c.done ? '✓' : (c.startedAt ? '…' : ' ');
+    const q = c.q != null ? `q=${c.q}` : '   ';
+    const pv = c.predicted_vmaf != null ? `pVMAF=${c.predicted_vmaf.toFixed(1)}` : '         ';
+    const meas = c.done ? `${c.fps.toFixed(1)} fps · ${c.seconds.toFixed(1)}s` : '';
+    return `<div>${status} chunk ${String(id).padStart(2)} · ${q.padEnd(5)} · ${pv.padEnd(11)}  ${meas}</div>`;
+  }).join('');
 }
 
 // ── Result ────────────────────────────────────────────────────────────────

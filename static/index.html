@@ -124,6 +124,16 @@
       <div class="text-sm text-slate-300 mb-2"><span id="upload-progress-label">Uploading…</span></div>
       <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill" style="width:0%"></div></div>
     </div>
+
+    <div id="upload-preview" class="hidden mt-4 flex items-start gap-4">
+      <video id="upload-preview-video"
+             class="w-56 max-w-full rounded-lg bg-black border border-white/10 shadow-md"
+             muted playsinline preload="metadata" controls></video>
+      <div class="text-xs text-slate-400 leading-relaxed">
+        <div id="upload-preview-name" class="text-slate-200 font-medium truncate max-w-[24rem]">—</div>
+        <div id="upload-preview-meta" class="mt-0.5">—</div>
+      </div>
+    </div>
   </section>
 
   <!-- Section 2: Analysis -->
@@ -214,6 +224,24 @@
         <p class="text-xs text-slate-400 mt-1">Av1an splits the video into scenes and encodes them in parallel.</p>
       </div>
 
+      <!-- SVT-AV1 final preset (conditional, only when libsvtav1 / libsvtav1-tiny is selected) -->
+      <div id="svt-preset-row" class="hidden">
+        <label class="form-label">
+          SVT-AV1 final preset
+          <span id="svt-preset-val" class="text-accent-400 font-medium ml-1">4</span>
+          <span id="svt-preset-blurb" class="text-xs text-slate-400 ml-2"></span>
+        </label>
+        <input id="svt-preset-slider" type="range" min="2" max="8" value="4" step="1"
+               class="w-full max-w-md accent-accent-500" />
+        <div class="flex justify-between max-w-md text-[10px] text-slate-500 mt-1 select-none">
+          <span>2 (slowest)</span><span>4</span><span>6</span><span>8 (fastest)</span>
+        </div>
+        <p class="text-xs text-slate-400 mt-1">
+          Lower = better compression, slower encode. Each step ≈ 5–10% smaller files at iso-quality, ~1.5–2× encode time.
+          Probe encodes also use this preset (`--probe-slow`) so VMAF predictions match the final encode.
+        </p>
+      </div>
+
       <button id="encode-btn" class="btn-primary w-full md:w-auto" disabled>
         <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         Compress
@@ -245,9 +273,38 @@
         <div class="progress-bar"><div id="progress-fill" class="progress-fill" style="width:0%"></div></div>
       </div>
 
+      <!-- Live encoding stats (populated from av1an's debug log) -->
+      <div id="encode-stats" class="hidden">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[12px] mb-3">
+          <div class="rounded-lg bg-ink-900/60 border border-white/5 p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-400">Input</div>
+            <div id="es-input" class="text-sm font-semibold text-slate-200 tabular-nums">—</div>
+            <div id="es-input-sub" class="text-[10px] text-slate-500">—</div>
+          </div>
+          <div class="rounded-lg bg-ink-900/60 border border-white/5 p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-400">Scenes / Chunks</div>
+            <div id="es-scenes" class="text-sm font-semibold text-slate-200 tabular-nums">—</div>
+            <div id="es-scenes-sub" class="text-[10px] text-slate-500">—</div>
+          </div>
+          <div class="rounded-lg bg-ink-900/60 border border-white/5 p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-400">Chunks done</div>
+            <div id="es-chunks" class="text-sm font-semibold text-slate-200 tabular-nums">0 / —</div>
+            <div id="es-chunks-sub" class="text-[10px] text-slate-500">avg — fps</div>
+          </div>
+          <div class="rounded-lg bg-ink-900/60 border border-white/5 p-3">
+            <div class="text-[10px] uppercase tracking-wider text-slate-400">CRFs chosen</div>
+            <div id="es-crfs" class="text-sm font-semibold text-slate-200 tabular-nums">—</div>
+            <div id="es-crfs-sub" class="text-[10px] text-slate-500">predicted VMAF</div>
+          </div>
+        </div>
+        <div id="es-chunk-list" class="text-[11px] text-slate-400 font-mono space-y-0.5 max-h-32 overflow-auto"></div>
+      </div>
+
       <details class="bg-ink-900/40 rounded-lg p-3 border border-white/5">
-        <summary class="text-sm text-slate-300 cursor-pointer select-none">Encoder log</summary>
-        <pre id="progress-log" class="mt-2 text-xs text-slate-400 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono leading-snug"></pre>
+        <summary class="text-sm text-slate-300 cursor-pointer select-none">Encoder log
+          <span id="log-line-count" class="ml-2 text-xs text-slate-500"></span>
+        </summary>
+        <pre id="progress-log" class="mt-2 text-xs max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono leading-snug"></pre>
       </details>
     </div>
   </section>

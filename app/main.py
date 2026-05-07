@@ -158,6 +158,10 @@ class EncodeBody(BaseModel):
     encoder_id: str
     target_vmaf: float
     workers: int | None = None
+    # Optional override of the encoder's default preset (SVT-AV1 0-13,
+    # x264/x265 string presets aren't supported here yet). The backend
+    # rewrites `--preset N` in the encoder params before launching.
+    encoder_preset: int | None = None
 
 
 @app.post("/api/encode")
@@ -180,12 +184,17 @@ async def api_encode(body: EncodeBody):
     out_name = f"{Path(upload['path']).stem}_{encoder.id}_vmaf{int(body.target_vmaf)}.{encoder.container}"
     out_path = OUTPUT_DIR / out_name
 
+    extra: dict = {}
+    if body.workers:
+        extra["workers"] = body.workers
+    if body.encoder_preset is not None:
+        extra["encoder_preset"] = body.encoder_preset
     req = EncodeRequest(
         input_path=upload["path"],
         output_path=str(out_path),
         encoder=encoder,
         target_vmaf=body.target_vmaf,
-        extra_options={"workers": body.workers} if body.workers else {},
+        extra_options=extra,
     )
 
     asyncio.create_task(_run_encode_job(req, body.backend, job, upload))

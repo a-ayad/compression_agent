@@ -36,9 +36,46 @@ class Encoder:
     av1an_params: Optional[str]
     gpu_required: bool = False
     description: str = ""
+    # Optional ffmpeg video-filter chain applied to the source before
+    # encoding. Used to bake in pre-processing (denoise, etc) that gives
+    # specific encoder presets their characteristic look. The filter is
+    # passed via `--vfilter` to ab-av1 and via `--ffmpeg "-vf …"` to av1an.
+    pre_filter: Optional[str] = None
+    # When set, ab-av1's `-e` and the host capability lookup use this
+    # instead of `id`. Lets us add multiple "presets" that share an
+    # underlying ffmpeg encoder (e.g. libsvtav1 vs libsvtav1-tiny).
+    ffmpeg_encoder: Optional[str] = None
+    # Surfaced under the encoder card as a small note about the trade-off.
+    notes: Optional[str] = None
+    # If set, the UI auto-selects this VMAF target whenever this preset
+    # is chosen. Use for presets where the default VMAF (90) doesn't
+    # match the design point (e.g. low-bitrate delivery presets).
+    recommended_vmaf_target: Optional[int] = None
+    # av1an's `--passes` value. Defaults to 1 (single-pass) for backwards
+    # compatibility with the existing presets. 2-pass with libsvtav1's
+    # turbo first pass is meaningfully better at low bitrates.
+    av1an_passes: int = 1
+    # When set, the encoder skips av1an's per-chunk VMAF target search and
+    # encodes directly at this CRF. The user's chosen target VMAF becomes
+    # informational only — useful for delivery presets where the trade-off
+    # is fixed by design (e.g. CRF 50 always lands ~450 kbps on 720p60
+    # talking-head content with SVT-AV1 v4 preset 5).
+    fixed_crf: Optional[int] = None
+    # av1an `--min-q` / `--max-q` bounds for the target-quality CRF search.
+    # Set BOTH to bias the search toward a particular operating point: e.g.
+    # min_q=38 / max_q=55 makes av1an test the high-CRF (small-file) end
+    # first and only drop CRF if the VMAF target isn't met. None = av1an
+    # uses its built-in defaults (typically 0..63).
+    av1an_min_q: Optional[int] = None
+    av1an_max_q: Optional[int] = None
+
+    @property
+    def real_encoder(self) -> str:
+        return self.ffmpeg_encoder or self.id
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        d["real_encoder"] = self.real_encoder
         return d
 
 
@@ -53,11 +90,73 @@ CATALOG: list[Encoder] = [
         label="AV1 — SVT-AV1 (software)",
         codec="av1", container="mkv", type="sw",
         backends=["ab-av1", "av1an"],
-        preset="6",
-        ab_av1_extra=["--preset", "6", "--pix-format", "yuv420p10le", "--min-crf", "18", "--max-crf", "45"],
+        preset="4",
+        # Preset 4 is the slow side of "fast enough" — ~10-13% better
+        # compression than preset 6 at ~3× encode time on typical content.
+        # av1an's probe encodes still run at SVT-AV1's default fast preset
+        # (preset 8), so the slowdown only affects the final encode.
+        ab_av1_extra=["--preset", "4", "--pix-format", "yuv420p10le", "--min-crf", "18", "--max-crf", "45"],
         av1an_encoder="svt-av1",
-        av1an_params="--preset 6 --keyint 240 --tune 0",
+        av1an_params="--preset 4 --keyint 240 --tune 0",
         description="Best practical AV1 encoder. Outstanding size-at-VMAF, runs on CPU.",
+    ),
+    Encoder(
+        id="libsvtav1-tiny",
+        label="AV1 — Tiny (delivery, SVT-AV1 v4)",
+        codec="av1", container="mkv", type="sw",
+        # av1an only — av1an invokes SvtAv1EncApp directly so it picks up
+        # the v4.1.0 binary in /usr/local/bin. ffmpeg in this image still
+        # links to v2.1.2 (the system /usr/lib64 lib); ab-av1 would silently
+        # use the older encoder and miss v4's compression gains.
+        # NOTE: SVT-AV1 v4 explicitly rejects multi-pass with CRF
+        # ("CRF does not support multi-pass"); HandBrake's `MultiPass: true`
+        # was a no-op for this codec. Single-pass CRF + preset 4 + v4 is
+        # the actual recipe.
+        backends=["av1an"],
+        preset="4",
+        ffmpeg_encoder="libsvtav1",
+        # ab-av1 path is intentionally inert (av1an-only preset).
+        ab_av1_extra=[
+            "--preset", "4", "--pix-format", "yuv420p",
+            "--min-crf", "38", "--max-crf", "55",
+            "--keyint", "5s",
+        ],
+        av1an_encoder="svt-av1",
+        # Preset 4 + GOP 320 (~5s @ 60fps). NOTE no `--crf` here —
+        # av1an_min_q / av1an_max_q below bias av1an's --target-quality
+        # binary search toward CRF 50ish so easy content (talking heads)
+        # lands at CRF ~50 (matching HandBrake's 450 kbps), and harder
+        # content drops down to the lower CRF bound only if needed to
+        # honestly meet the VMAF target.
+        av1an_params=(
+            "--preset 4 --keyint 320 --tune 0 --enable-tf 1 --scd 1"
+        ),
+        # Search range for av1an --target-quality. min_q=38 / max_q=55
+        # tests the high-CRF (small-file) end first; the binary search
+        # picks the highest CRF that meets the user's target VMAF (default
+        # 85 for this preset — see recommended_vmaf_target). For talking-
+        # head content this lands on CRF ~50 ≈ 450 kbps; for more complex
+        # content it drops to ~CRF 42 ≈ 1 Mbps.
+        av1an_min_q=38,
+        av1an_max_q=55,
+        # No pre-filter. SVT-AV1 v4 + preset 5 + 2-pass handles smooth
+        # content efficiently without denoising. Filtering would only hurt
+        # detail retention and the encoder doesn't need the help anymore.
+        pre_filter=None,
+        description=(
+            "Bandwidth-optimised AV1 (SVT-AV1 v4.1.0, preset 4). av1an "
+            "probes the CRF 38-55 range biased toward high CRF — easy "
+            "content lands at CRF ~50 (~450 kbps on talking-head 720p), "
+            "harder content drops down only as needed to honestly meet "
+            "the VMAF target. No enhancement tricks."
+        ),
+        notes=(
+            "Auto-targets VMAF 85; backend auto-switches to av1an. Probes "
+            "the high-CRF end first, so you get a small file when the "
+            "content is well-compressible and a slightly bigger file "
+            "(still tiny vs source) when it isn't."
+        ),
+        recommended_vmaf_target=85,
     ),
     Encoder(
         id="av1_nvenc",
@@ -174,9 +273,9 @@ def list_encoders() -> list[dict]:
                 available = False
                 reasons.append(f"NVENC {kind.upper()} not detected on this GPU")
         else:
-            if not caps.sw_encoders.get(enc.id, False):
+            if not caps.sw_encoders.get(enc.real_encoder, False):
                 available = False
-                reasons.append(f"ffmpeg encoder {enc.id} not built in")
+                reasons.append(f"ffmpeg encoder {enc.real_encoder} not built in")
         d = enc.to_dict()
         d["available"] = available
         d["unavailable_reason"] = "; ".join(reasons) if reasons else None

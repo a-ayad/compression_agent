@@ -20,6 +20,7 @@ bin/
 # get large quickly.
 uploads/
 outputs/
+vmaf-uploads/
 *.vmaf.json
 
 # Stray dirs created by a botched powershell redirection (e.g. `outputs;C/`)

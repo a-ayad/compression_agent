@@ -1,0 +1,48 @@
+# Standalone compose stack for the CUDA VMAF service.
+#
+# This is intentionally NOT chained with docker-compose.yml — the VMAF
+# service is its own app with its own volume, its own port, and its own
+# UI. Bring it up independently of the main compression agent:
+#
+#   docker compose -f docker-compose.vmaf.yml up -d --build
+#
+# The launcher script `vmaf-up.sh` is a thin wrapper that handles
+# nvidia-container-toolkit detection / install before this runs.
+#
+# `name:` puts the vmaf service in its own compose project so it doesn't
+# show up as an orphan when other compose stacks in this directory run
+# (the main compression agent uses the directory's default project name).
+
+name: cuda-vmaf
+
+services:
+  vmaf:
+    build:
+      context: .
+      dockerfile: vmaf-service/Dockerfile.vmaf
+    image: cuda-vmaf:latest
+    container_name: cuda-vmaf
+    restart: unless-stopped
+    # ./vmaf-uploads survives container rebuilds; the in-memory upload
+    # registry rebuilds itself from this dir on startup, so users don't
+    # lose their uploaded clips when the image is bumped.
+    volumes:
+      - ./vmaf-uploads:/work/uploads
+    environment:
+      VMAF_WORK_DIR: "/work"
+    ports:
+      - "${VMAF_HOST_PORT:-8011}:8001"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<title>CUDA VMAF</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.tailwindcss.com?plugins=forms"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          ink: { 950: '#08080e', 900: '#0e0e18', 800: '#161624', 700: '#1f1f33', 600: '#2c2c47' },
+          accent: { 400: '#e879f9', 500: '#c026d3', 600: '#a21caf' },
+          good:   { 400: '#4ade80', 500: '#22c55e' },
+        },
+        boxShadow: {
+          glow: '0 0 0 1px rgba(232,121,249,.25), 0 8px 30px -10px rgba(192,38,211,.45)',
+        },
+      },
+    },
+  };
+</script>
+<style type="text/tailwindcss">
+  @layer components {
+    .card        { @apply bg-ink-900/70 backdrop-blur-sm border border-white/5 rounded-2xl p-6 shadow-lg; }
+    .card-header { @apply flex flex-wrap items-center gap-x-3 gap-y-1 mb-5; }
+    .card-title  { @apply text-lg font-semibold; }
+    .card-sub    { @apply text-sm text-slate-400 w-full md:w-auto md:ml-auto; }
+
+    .step-pill   { @apply inline-flex items-center justify-center w-7 h-7 rounded-full
+                          bg-accent-500/15 text-accent-400 text-xs font-semibold border border-accent-500/30; }
+
+    .dropzone        { @apply rounded-2xl border-2 border-dashed border-white/10 bg-ink-800/40 px-6 py-8 text-center
+                              cursor-pointer hover:border-accent-500/50 hover:bg-ink-800/60 transition-colors duration-200; }
+    .dropzone.drag   { @apply border-accent-500 bg-accent-500/10; }
+
+    .file-row    { @apply flex items-center gap-3 px-3 py-2 rounded-lg border border-white/5 bg-ink-800/40 hover:bg-ink-800; }
+    .file-row.selected { @apply border-accent-500/50 bg-accent-500/10; }
+    .file-name   { @apply text-sm font-medium text-slate-200 truncate flex-1; }
+    .file-meta   { @apply text-xs text-slate-400; }
+
+    .form-label  { @apply block text-sm font-medium text-slate-300 mb-2; }
+    .pill        { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wider; }
+    .pill-on     { @apply bg-good-500/15 text-good-400 border border-good-500/30; }
+    .pill-off    { @apply bg-slate-700 text-slate-400 border border-slate-600; }
+
+    .btn-primary { @apply inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl
+                          bg-gradient-to-r from-accent-500 to-fuchsia-600 text-white font-medium text-sm
+                          shadow-glow hover:brightness-110 active:scale-[0.99] transition disabled:opacity-40 disabled:cursor-not-allowed; }
+    .btn-ghost   { @apply text-xs text-accent-400 hover:underline; }
+
+    .big-metric        { @apply rounded-xl bg-ink-900/60 border border-white/5 p-5; }
+    .big-metric-label  { @apply text-xs uppercase tracking-wider text-slate-400 mb-1; }
+    .big-metric-value  { @apply text-3xl font-bold tabular-nums; }
+
+    .progress-bar  { @apply w-full h-2 bg-ink-800 rounded-full overflow-hidden border border-white/5; }
+    .progress-fill { @apply h-full bg-gradient-to-r from-accent-500 to-fuchsia-500 rounded-full transition-[width] duration-300 ease-out; }
+  }
+</style>
+</head>
+<body class="min-h-screen bg-ink-950 text-slate-100 antialiased">
+
+<div aria-hidden="true" class="fixed inset-0 overflow-hidden pointer-events-none -z-10">
+  <div class="absolute -top-40 -left-40 w-[40rem] h-[40rem] rounded-full bg-accent-500/15 blur-3xl"></div>
+  <div class="absolute top-40 -right-32 w-[36rem] h-[36rem] rounded-full bg-fuchsia-500/10 blur-3xl"></div>
+  <div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-[60rem] h-[40rem] rounded-full bg-purple-500/10 blur-3xl"></div>
+</div>
+
+<header class="max-w-5xl mx-auto px-6 pt-10 pb-6">
+  <div class="flex items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-accent-500 to-fuchsia-600 flex items-center justify-center shadow-glow">
+        <svg viewBox="0 0 24 24" class="w-6 h-6 text-white" fill="none" stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12h4l3-9 4 18 3-9h4"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-xl font-semibold tracking-tight">CUDA VMAF</h1>
+        <p class="text-xs text-slate-400">GPU-accelerated perceptual quality scoring</p>
+      </div>
+    </div>
+    <div id="caps-badge" class="hidden md:flex items-center gap-2 text-xs"></div>
+  </div>
+</header>
+
+<main class="max-w-5xl mx-auto px-6 pb-24 space-y-6">
+
+  <!-- 1. Upload -->
+  <section class="card">
+    <div class="card-header">
+      <span class="step-pill">1</span>
+      <h2 class="card-title">Upload videos</h2>
+      <p class="card-sub">Any container ffmpeg can read · stays in this service</p>
+    </div>
+    <div id="dropzone" class="dropzone">
+      <input id="file-input" type="file" accept="video/*" multiple class="hidden" />
+      <div class="flex flex-col items-center gap-3">
+        <svg class="w-10 h-10 text-accent-400" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <div class="text-base font-medium">Drop videos, or <span id="browse-btn" class="text-accent-400 underline cursor-pointer">browse</span></div>
+        <div class="text-xs text-slate-400">Multiple files supported · uploaded files persist for re-comparison</div>
+      </div>
+    </div>
+    <div id="upload-progress" class="hidden mt-4">
+      <div class="flex items-center justify-between text-sm text-slate-300 mb-2">
+        <span id="upload-progress-label">Uploading…</span>
+        <span id="upload-progress-pct">0%</span>
+      </div>
+      <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill" style="width:0%"></div></div>
+    </div>
+  </section>
+
+  <!-- 2. Pick + Compare -->
+  <section class="card">
+    <div class="card-header">
+      <span class="step-pill">2</span>
+      <h2 class="card-title">Pick clips and compare</h2>
+      <p class="card-sub">1 reference · 1 or 2 distorted</p>
+    </div>
+
+    <div id="files-empty" class="text-sm text-slate-400">No uploads yet — drop a file above to start.</div>
+
+    <div id="files-list" class="space-y-2"></div>
+
+    <div id="picks-summary" class="hidden mt-5 grid md:grid-cols-3 gap-3 text-sm">
+      <div class="big-metric">
+        <div class="big-metric-label">Reference</div>
+        <div id="pick-ref" class="text-slate-200 font-medium truncate">—</div>
+      </div>
+      <div class="big-metric">
+        <div class="big-metric-label">Distorted A</div>
+        <div id="pick-a" class="text-slate-200 font-medium truncate">—</div>
+      </div>
+      <div class="big-metric">
+        <div class="big-metric-label">Distorted B</div>
+        <div id="pick-b" class="text-slate-200 font-medium truncate">—</div>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-4 mt-5">
+      <label class="text-sm flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" id="use-cuda" checked class="accent-accent-500">
+        Use CUDA (libvmaf_cuda)
+      </label>
+      <label class="text-sm flex items-center gap-2 cursor-pointer"
+             title="When the reference is below 1728×972, scale both inputs to 1920×1080 before VMAF. The libvmaf 1k model is trained on 1080p — sub-1080p sources score ~15 points lower at native res.">
+        <input type="checkbox" id="upscale-1080p" class="accent-accent-500">
+        Upscale sub-1080p → 1080p
+      </label>
+      <label class="text-sm flex items-center gap-2">
+        Model
+        <select id="model" class="bg-ink-800 border border-white/10 rounded px-2 py-1 text-sm">
+          <option>vmaf_v0.6.1</option>
+          <option>vmaf_v0.6.1neg</option>
+          <option>vmaf_4k_v0.6.1</option>
+        </select>
+      </label>
+      <button id="clear-picks" class="ml-auto btn-ghost">Clear selection</button>
+      <button id="inspect" class="btn-primary !bg-gradient-to-r !from-amber-500 !to-orange-500" disabled
+              title="Run a multi-metric inspection on one ref + one distorted: VMAF (regular + neg), PSNR, SSIM, and a Laplacian-variance detail measure. Slower than Run VMAF; produces explanations.">
+        <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        Deep inspect
+      </button>
+      <button id="run" class="btn-primary" disabled>
+        <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/>
+        </svg>
+        Run VMAF
+      </button>
+    </div>
+
+    <div id="status" class="text-sm text-slate-400 mt-4"></div>
+  </section>
+
+  <!-- 3. Results -->
+  <section id="results-section" class="card hidden">
+    <div class="card-header">
+      <span class="step-pill">3</span>
+      <h2 class="card-title">Results</h2>
+      <p class="card-sub" id="results-sub">—</p>
+    </div>
+    <div id="results" class="grid md:grid-cols-2 gap-3"></div>
+  </section>
+
+  <!-- 4. Deep inspect results -->
+  <section id="inspect-section" class="card hidden">
+    <div class="card-header">
+      <span class="step-pill">4</span>
+      <h2 class="card-title">Deep inspection</h2>
+      <p class="card-sub" id="inspect-sub">—</p>
+    </div>
+
+    <div class="mb-5">
+      <div class="text-xs uppercase tracking-wider text-slate-400 mb-1">Reference</div>
+      <div class="flex items-start gap-3">
+        <img id="inspect-ref-img" class="w-64 max-w-full rounded-lg border border-white/10 bg-black" />
+        <div id="inspect-ref-meta" class="text-[11px] text-slate-400 leading-relaxed">—</div>
+      </div>
+    </div>
+
+    <div id="inspect-scores" class="grid md:grid-cols-2 gap-4 mb-5"></div>
+
+    <div id="inspect-pair" class="hidden mb-2">
+      <div class="text-xs uppercase tracking-wider text-slate-400 mb-2">Comparison findings</div>
+      <div id="inspect-pair-findings" class="space-y-2"></div>
+    </div>
+  </section>
+
+  <footer class="text-center text-xs text-slate-500 pt-4">
+    Built on FFmpeg · libvmaf 3.0 (CUDA) · CUDA 12.8
+  </footer>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
