@@ -61,21 +61,25 @@ done
 have_full_ffmpeg() {
     local ff="$1"
     [[ -x "$ff" ]] || return 1
-    "$ff" -hide_banner -filters 2>/dev/null | grep -q libvmaf || return 1
-    "$ff" -hide_banner -encoders 2>/dev/null | grep -qE '^\s*V[. ]+libsvtav1' || return 1
+    # Drain the full stream (no `grep -q`): with `set -o pipefail`, an early
+    # grep exit gives ffmpeg SIGPIPE (141), which then fails the pipeline.
+    "$ff" -hide_banner -filters  2>/dev/null | grep    libvmaf   >/dev/null || return 1
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -E '^\s*V[. ]+libsvtav1' >/dev/null || return 1
 }
 
 install_static_ffmpeg() {
-    local url="https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz"
+    # BtbN's GPL build ships libsvtav1 + libvmaf + NVENC; johnvansickle's does not.
+    local url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
     local tmp; tmp=$(mktemp -d)
-    say "Downloading static ffmpeg from johnvansickle.com (~80 MB)…"
+    say "Downloading static ffmpeg from BtbN/FFmpeg-Builds (~100 MB)…"
     curl -fsSL --retry 3 -o "$tmp/ffmpeg.tar.xz" "$url" || die "ffmpeg download failed"
     say "Extracting…"
     tar -C "$tmp" -xf "$tmp/ffmpeg.tar.xz"
-    local extracted; extracted=$(find "$tmp" -maxdepth 1 -type d -name 'ffmpeg-*' | head -1)
-    [[ -n "$extracted" ]] || die "Could not locate extracted ffmpeg directory"
-    install -m 0755 "$extracted/ffmpeg"  "$BIN/ffmpeg"
-    install -m 0755 "$extracted/ffprobe" "$BIN/ffprobe"
+    local ffmpeg_path;  ffmpeg_path=$(find "$tmp" -type f -name ffmpeg  | head -1)
+    local ffprobe_path; ffprobe_path=$(find "$tmp" -type f -name ffprobe | head -1)
+    [[ -n "$ffmpeg_path" && -n "$ffprobe_path" ]] || die "Could not locate ffmpeg/ffprobe in archive"
+    install -m 0755 "$ffmpeg_path"  "$BIN/ffmpeg"
+    install -m 0755 "$ffprobe_path" "$BIN/ffprobe"
     rm -rf "$tmp"
 }
 
@@ -125,7 +129,7 @@ if command -v nvidia-smi >/dev/null; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
     if [[ -n "$GPU_NAME" ]]; then
         ok "NVIDIA GPU detected: $GPU_NAME"
-        if "$BIN/ffmpeg" -hide_banner -encoders 2>/dev/null | grep -q hevc_nvenc; then
+        if "$BIN/ffmpeg" -hide_banner -encoders 2>/dev/null | grep hevc_nvenc >/dev/null; then
             ok "  ffmpeg has NVENC encoders compiled in"
         else
             warn "ffmpeg has no NVENC encoders — hardware acceleration disabled"
