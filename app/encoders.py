@@ -104,10 +104,20 @@ CATALOG: list[Encoder] = [
         id="libsvtav1-tiny",
         label="AV1 — Tiny (delivery, SVT-AV1 v4)",
         codec="av1", container="mkv", type="sw",
-        # av1an only — av1an invokes SvtAv1EncApp directly so it picks up
-        # the v4.1.0 binary in /usr/local/bin. ffmpeg in this image still
-        # links to v2.1.2 (the system /usr/lib64 lib); ab-av1 would silently
-        # use the older encoder and miss v4's compression gains.
+        # av1an-only is now a soft constraint, not a hard technical one.
+        # The original reason — "ffmpeg links the stale system SVT-AV1
+        # v2.1.2; only av1an's direct SvtAv1EncApp call reaches v4" — no
+        # longer holds: bin/ffmpeg is the BtbN build and links SVT-AV1
+        # v4.1.0. ab-av1 drives that ffmpeg and reproduces this preset
+        # (tested 2026-05-18: CRF ~49 → ~479 kbps at the VMAF target on
+        # vidyo4, comparable to av1an's ~340-460 kbps on the same source).
+        # CAVEAT before flipping `backends` to include ab-av1: ab-av1 has
+        # no --ffmpeg flag — it resolves `ffmpeg` from PATH — and the
+        # ab-av1 backend (app/backends/ab_av1.py) spawns it WITHOUT a PATH
+        # override. On Linux it therefore picks up the distro ffmpeg, not
+        # bin/ffmpeg, which links old SVT and lacks libvmaf (VMAF probes
+        # then fail outright). Fix that first (spawn ab-av1 with bin/ on
+        # PATH) or this preset will silently use the wrong encoder.
         # NOTE: SVT-AV1 v4 explicitly rejects multi-pass with CRF
         # ("CRF does not support multi-pass"); HandBrake's `MultiPass: true`
         # was a no-op for this codec. Single-pass CRF + preset 4 + v4 is

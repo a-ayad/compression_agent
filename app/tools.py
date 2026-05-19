@@ -191,3 +191,29 @@ def get_capabilities(refresh: bool = False) -> Capabilities:
     if _cached is None or refresh:
         _cached = detect()
     return _cached
+
+
+def tool_env(extra: Optional[dict] = None) -> dict:
+    """Build a subprocess environment with the detected ffmpeg's directory
+    prepended to PATH.
+
+    ab-av1 has no --ffmpeg flag and av1an shells out to ffmpeg by name;
+    both resolve `ffmpeg`/`ffprobe` from PATH. `_find_ffmpeg()` prefers the
+    project-local static build (in bin/), but that preference is useless to
+    a child process unless bin/ is actually on its PATH — otherwise the
+    child silently picks up the distro ffmpeg, which may link an old
+    SVT-AV1 and lack the libvmaf filter (VMAF probes then fail outright).
+
+    Prepending here makes the child agree with `caps.ffmpeg`. `extra`
+    overrides are applied last (e.g. TERM, RUST_LOG for av1an).
+    """
+    env = dict(os.environ)
+    caps = get_capabilities()
+    if caps.ffmpeg:
+        ff_dir = str(Path(caps.ffmpeg).resolve().parent)
+        parts = env.get("PATH", "").split(os.pathsep)
+        if ff_dir not in parts:
+            env["PATH"] = ff_dir + os.pathsep + env.get("PATH", "")
+    if extra:
+        env.update(extra)
+    return env

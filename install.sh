@@ -140,51 +140,111 @@ else
 fi
 
 # ── 4. Av1an (optional) ────────────────────────────────────────────────────
-install_av1an_pkgs() {
-    local pm_install
-    if   command -v apt-get >/dev/null; then pm_install="sudo apt-get install -y"
-    elif command -v dnf     >/dev/null; then pm_install="sudo dnf install -y"
-    elif command -v pacman  >/dev/null; then pm_install="sudo pacman -S --needed --noconfirm"
-    elif command -v apk     >/dev/null; then pm_install="sudo apk add"
-    else
-        warn "Unknown package manager — install vapoursynth + plugins manually."
+# Ubuntu/Debian dropped the `vapoursynth` package (not in noble's repos), and
+# there is no `av1an` apt package. So on apt systems we build VapourSynth from
+# source and install av1an via cargo. dnf/pacman still ship the packages.
+#
+# Encoder CLIs: av1an drives encoder *binaries* directly (not ffmpeg). x264 and
+# x265 come from apt; SVT-AV1's `SvtAv1EncApp` is NOT installed here — the apt
+# `svt-av1` is far too old for the libsvtav1* presets, which need v4. Build it
+# separately (or use the ab-av1 backend, which reaches SVT-AV1 v4 via ffmpeg).
+
+VS_TAG="${VAPOURSYNTH_TAG:-R72}"   # R72 = VSScript API 4.2; the av1an `vapoursynth`
+                                   # crate requests 4.1, which R76+ rejects.
+
+install_av1an_apt() {
+    local apt="sudo apt-get install -y --no-install-recommends"
+    say "Installing av1an build deps + encoder CLIs via apt"
+    # build-essential etc. for VapourSynth; x264/x265 + mkvtoolnix for av1an;
+    # libffms2-dev ships a working VapourSynth source plugin.
+    $apt build-essential autoconf automake libtool pkg-config nasm git \
+         cython3 python3-dev python3-pip libzimg-dev libffms2-dev \
+         mkvtoolnix x264 x265 || { warn "apt deps install failed"; return 1; }
+    # Ubuntu's Cython (3.0.x) emits code incompatible with Python 3.12's
+    # PyLong internals — VapourSynth's Cython module needs >= 3.1.
+    pip install --break-system-packages --quiet --upgrade Cython || true
+}
+
+build_vapoursynth_source() {
+    if command -v vspipe >/dev/null && python3 -c 'import vapoursynth' 2>/dev/null; then
+        ok "VapourSynth already present ($(vspipe --version 2>&1 | head -1))"
         return 0
     fi
+    local tmp; tmp=$(mktemp -d)
+    say "Building VapourSynth $VS_TAG from source (~2 min)"
+    git clone --quiet --depth 1 -b "$VS_TAG" https://github.com/vapoursynth/vapoursynth "$tmp/vs" \
+        || { warn "VapourSynth clone failed"; return 1; }
+    ( cd "$tmp/vs" && ./autogen.sh && ./configure && make -j"$(nproc)" && sudo make install ) \
+        || { warn "VapourSynth build failed"; return 1; }
+    sudo ldconfig
+    # autotools installs the Python module to .../site-packages; Debian/Ubuntu
+    # Python only searches .../dist-packages. Copy it across.
+    local pv; pv=$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    local src="/usr/local/lib/python$pv/site-packages/vapoursynth.so"
+    [[ -f "$src" ]] && sudo install -m644 "$src" "/usr/local/lib/python$pv/dist-packages/vapoursynth.so"
+    rm -rf "$tmp"
+    # FFMS2 source plugin -> VapourSynth's autoload dir (so `ffms2` chunk method works).
+    sudo mkdir -p /usr/local/lib/vapoursynth
+    local ffms2; ffms2=$(find /usr/lib -name 'libffms2.so*' 2>/dev/null | head -1)
+    [[ -n "$ffms2" ]] && sudo ln -sf "$ffms2" /usr/local/lib/vapoursynth/libffms2.so
+    command -v vspipe >/dev/null && ok "VapourSynth installed ($(vspipe --version 2>&1 | head -1))"
+}
 
-    say "Installing VapourSynth + plugins via system package manager"
-    case "$pm_install" in
-        *apt-get*)
-            $pm_install vapoursynth python3-vapoursynth vapoursynth-extra-plugins \
-                        ffms2 mkvtoolnix av1an 2>/dev/null || \
-            $pm_install vapoursynth python3-vapoursynth ffms2 mkvtoolnix || true ;;
-        *dnf*)
-            $pm_install vapoursynth python3-vapoursynth vapoursynth-plugin-ffms2 \
-                        vapoursynth-plugin-lsmashsource mkvtoolnix av1an || true ;;
-        *pacman*)
-            $pm_install vapoursynth python-vapoursynth vapoursynth-plugin-lsmashsource \
-                        vapoursynth-plugin-ffms2 mkvtoolnix-cli av1an || true ;;
-        *)  warn "Distro not auto-handled; install VapourSynth + L-SMASH/FFMS2 plugins manually." ;;
-    esac
+ensure_cargo() {
+    # av1an 0.5.x needs rustc >= 1.88; distro cargo is usually older.
+    local cargo_bin; cargo_bin=$(command -v cargo || echo "")
+    if [[ -n "$cargo_bin" ]]; then
+        local v; v=$(cargo --version | awk '{print $2}')
+        if [[ "$(printf '%s\n1.88.0\n' "$v" | sort -V | head -1)" == "1.88.0" ]]; then
+            return 0
+        fi
+        warn "cargo $v is too old for av1an; installing rustup toolchain"
+    fi
+    if ! command -v rustup >/dev/null; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal \
+            || { warn "rustup install failed"; return 1; }
+    fi
+    export PATH="$HOME/.cargo/bin:$PATH"
 }
 
 install_av1an_binary() {
-    if command -v av1an >/dev/null; then
-        ok "av1an already on PATH ($(av1an --version 2>&1 | head -1))"
+    if command -v av1an >/dev/null && av1an --version >/dev/null 2>&1; then
+        ok "av1an already working ($(av1an --version 2>&1 | head -1))"
         return 0
     fi
-    say "Building av1an from source via cargo (needs Rust toolchain)"
-    if ! command -v cargo >/dev/null; then
-        warn "cargo not found. Install Rust (https://rustup.rs) and re-run with --with-av1an,"
-        warn "or install the av1an package via your distro."
-        return 1
-    fi
-    cargo install av1an --locked
-    ok "av1an installed to $HOME/.cargo/bin (ensure that's on PATH)"
+    ensure_cargo || return 1
+    say "Building av1an from source via cargo"
+    # PKG_CONFIG_PATH + -L so the vapoursynth crate finds the source-built libs.
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+    RUSTFLAGS="-L /usr/local/lib" \
+        "$HOME/.cargo/bin/cargo" install av1an --locked --force \
+        || { warn "av1an cargo build failed"; return 1; }
+    sudo ln -sf "$HOME/.cargo/bin/av1an" /usr/local/bin/av1an
+    ok "av1an installed ($(av1an --version 2>&1 | head -1))"
+}
+
+install_av1an_other_pm() {
+    local apt
+    if   command -v dnf    >/dev/null; then apt="sudo dnf install -y"
+    elif command -v pacman >/dev/null; then apt="sudo pacman -S --needed --noconfirm"
+    else warn "Unknown package manager — install VapourSynth + av1an manually."; return 0; fi
+    say "Installing VapourSynth + av1an via system package manager"
+    case "$apt" in
+        *dnf*)    $apt vapoursynth python3-vapoursynth vapoursynth-plugin-ffms2 \
+                       vapoursynth-plugin-lsmashsource mkvtoolnix x264 x265 av1an || true ;;
+        *pacman*) $apt vapoursynth python-vapoursynth vapoursynth-plugin-lsmashsource \
+                       vapoursynth-plugin-ffms2 mkvtoolnix-cli x264 x265 av1an || true ;;
+    esac
 }
 
 if (( WITH_AV1AN )); then
-    install_av1an_pkgs
-    install_av1an_binary || warn "Av1an step skipped — backend will be unavailable in the UI."
+    if command -v apt-get >/dev/null; then
+        install_av1an_apt && build_vapoursynth_source
+        install_av1an_binary || warn "Av1an step incomplete — backend may be unavailable in the UI."
+    else
+        install_av1an_other_pm
+    fi
 fi
 
 # ── 5. Python virtualenv + dependencies ────────────────────────────────────

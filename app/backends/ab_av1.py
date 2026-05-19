@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..progress import JobEvent, JobState
-from ..tools import get_capabilities
+from ..tools import get_capabilities, tool_env
 from .base import Backend, EncodeRequest, predictor_target
 
 
@@ -115,11 +115,14 @@ class AbAv1Backend:
             message="Searching for the lowest CRF that meets the VMAF target…",
         ))
 
+        # env: ab-av1 finds ffmpeg via PATH (no --ffmpeg flag), so put the
+        # detected ffmpeg's dir first — otherwise it uses the distro build.
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(Path(req.output_path).parent),
+            env=tool_env(),
         )
 
         state = {

@@ -33,6 +33,14 @@ function fmtDuration(s) {
   }
   return `${m}m ${ss}s`;
 }
+// Bits per pixel per frame for a given byte size, using the video's dimensions
+// (encodes keep the source resolution/fps/duration, so input geometry applies to both).
+function fmtBpp(sizeBytes, info) {
+  if (!sizeBytes || !info) return '—';
+  const px = info.width * info.height * Math.max(1, info.fps || 0) * Math.max(0.001, info.duration_s || 0);
+  if (!(px > 0)) return '—';
+  return `${(sizeBytes * 8 / px).toFixed(3)} bpp`;
+}
 function vmafColor(score) {
   if (score == null) return 'text-slate-300';
   if (score >= 95) return 'text-emerald-400';
@@ -601,12 +609,12 @@ function showResult(r) {
   const orig = $('#v-original');
   orig.src = r.input.url;
   orig.load();
-  $('#r-orig-meta').textContent = `${r.input.info.codec_label} · ${r.input.info.width}×${r.input.info.height} · ${fmtBytes(inSize)}`;
+  $('#r-orig-meta').textContent = `${r.input.info.codec_label} · ${r.input.info.width}×${r.input.info.height} · ${fmtBytes(inSize)} · ${fmtBpp(inSize, r.input.info)}`;
 
   const enc = $('#v-encoded');
   enc.src = r.output.url;
   enc.load();
-  $('#r-enc-meta').textContent = `${r.output.encoder_label} · ${fmtBytes(outSize)}`;
+  $('#r-enc-meta').textContent = `${r.output.encoder_label} · ${fmtBytes(outSize)} · ${fmtBpp(outSize, r.input.info)}`;
   $('#r-download').href = r.output.url;
   $('#r-download').download = r.output.filename;
 

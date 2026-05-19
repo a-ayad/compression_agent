@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..progress import JobEvent, JobState
-from ..tools import get_capabilities
+from ..tools import get_capabilities, tool_env
 from .base import Backend, EncodeRequest, predictor_target
 
 
@@ -286,9 +286,12 @@ class Av1anBackend:
             message="Detecting scenes for parallel encoding…",
         ))
 
-        env = dict(os.environ)
-        env["TERM"] = "dumb"  # try to suppress ANSI cursor games
-        env["RUST_LOG"] = env.get("RUST_LOG", "info")
+        # tool_env prepends the detected ffmpeg's dir to PATH — av1an shells
+        # out to ffmpeg by name and would otherwise pick up the distro build.
+        env = tool_env({
+            "TERM": "dumb",  # try to suppress ANSI cursor games
+            "RUST_LOG": os.environ.get("RUST_LOG", "info"),
+        })
 
         try:
             process = await asyncio.create_subprocess_exec(

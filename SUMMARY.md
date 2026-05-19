@@ -244,6 +244,162 @@ measurement should land near 90. Files that previously came back
 labeled "VMAF 90" will now honestly read mid-80s and be slightly
 larger to compensate.
 
+### 13. `install.sh` reported "ffmpeg incomplete" on a build that was fine
+After a clean Linux install the script kept re-downloading ffmpeg and
+then dying with *"Installed ffmpeg still missing libvmaf/libsvtav1"*.
+Two independent bugs stacked on top of each other:
+
+**Bug A — johnvansickle's static ffmpeg has no libsvtav1.** The
+johnvansickle.com build is widely used but ships a `--enable-` set
+without SVT-AV1. The encoder check `grep '^V[. ]+libsvtav1'` was
+therefore correctly failing; the diagnostic was honest, the source URL
+was wrong.
+
+**Fix:** switched `install_static_ffmpeg` to BtbN/FFmpeg-Builds GPL
+release (`ffmpeg-master-latest-linux64-gpl.tar.xz`), which ships
+libsvtav1 + libvmaf + NVENC. BtbN nests binaries one level deeper than
+johnvansickle (`<dir>/bin/ffmpeg` instead of `<dir>/ffmpeg`), so the
+extraction step now uses `find -type f -name ffmpeg` rather than the
+hardcoded top-level path.
+
+**Bug B — `grep -q` + `set -o pipefail` = false negatives on large
+streams.** `have_full_ffmpeg` did:
+
+```bash
+"$ff" -hide_banner -encoders 2>/dev/null | grep -q libsvtav1
+```
+
+`grep -q` exits on the first match. With `set -o pipefail`, ffmpeg
+then gets `SIGPIPE` (exit 141) when it tries to keep writing — and
+the whole pipeline inherits that non-zero status. So the check
+returned "not present" *even when the match had succeeded*. This
+happened to work on johnvansickle's smaller `-filters` / `-encoders`
+output (ffmpeg finished writing before grep closed the pipe) but
+reliably failed on BtbN's longer output.
+
+**Fix:** replaced `grep -q PATTERN` with `grep PATTERN >/dev/null`
+everywhere in `install.sh`. grep now consumes the whole stream, ffmpeg
+exits cleanly, pipefail is happy.
+
+Also flipped the executable bit on `install.sh` and `run.sh` — they
+were committed without `+x` on the original first commit and required
+`bash ./install.sh` to run.
+
+### 14. Is av1an still worth keeping? — and the ffmpeg-on-PATH bug
+Prompted by a "does it still make sense to keep both backends" review.
+av1an's only *exclusive* job is the `libsvtav1-tiny` delivery preset
+(`backends=["av1an"]`); everything else lists av1an as a redundant
+second path, and all three NVENC encoders are ab-av1-only.
+
+The `encoders.py` comment justified `libsvtav1-tiny` being av1an-only
+with: *"ffmpeg in this image links to SVT-AV1 v2.1.2; av1an invokes
+SvtAv1EncApp directly to reach v4."* That is now stale — `bin/ffmpeg`
+is the BtbN build and links **SVT-AV1 v4.1.0-7-gb486d839** (also
+verified x265 `4.1+241`, x264 core 165 — all current).
+
+**Test:** ran `ab-av1 auto-encode` with the tiny preset's exact
+settings on a 10s vidyo4 talking-head clip.
+
+- **First run failed** — `ffmpeg vmaf exit code 8 … No such filter:
+  'libvmaf'`. ab-av1 had shelled out to the *distro* ffmpeg (Ubuntu
+  6.1.1, no libvmaf), not `bin/ffmpeg`.
+- **Root cause:** ab-av1 has no `--ffmpeg` flag — it resolves `ffmpeg`
+  from `PATH` — and `app/backends/ab_av1.py` spawned it with no `env=`
+  override. `_find_ffmpeg()`'s preference for `bin/` never reached the
+  child. This silently affected *all* ab-av1 encoding on Linux, not
+  just the tiny preset.
+- **Re-run with `bin/` on PATH:** binary search settled CRF 49.25 →
+  predicted VMAF 89.06, output **586 KB / ~479 kbps** — squarely in
+  the same delivery regime as av1an's existing tiny outputs on the
+  same source (337 / 434 / 460 kbps). av1an is no longer *technically*
+  required for this preset.
+
+**Fix #1 (the PATH bug):**
+- New `tool_env(extra=None)` in `app/tools.py` — copies the environment
+  and prepends the detected ffmpeg's directory to `PATH`.
+- `ab_av1.py` and `av1an.py` now spawn their subprocesses with
+  `env=tool_env(...)`. The probe/pre-transcode calls in `av1an.py`
+  already used explicit full paths, so only the tools that shell out
+  to `ffmpeg` *by name* (ab-av1, av1an itself) needed it.
+- Rewrote the stale `encoders.py` comment: records that the v2.1.2
+  rationale is dead, that ab-av1 can now do the preset, and the PATH
+  caveat that must be fixed before flipping `backends`.
+
+Status: `libsvtav1-tiny` still lists `backends=["av1an"]` — moving it
+to ab-av1 is a follow-up, now unblocked by Fix #1.
+
+### 15. Installing the av1an backend on Ubuntu 24.04
+`./install.sh --with-av1an` was a silent no-op on noble:
+
+```
+E: Unable to locate package vapoursynth
+E: Unable to locate package python3-vapoursynth
+E: Unable to locate package ffms2
+cargo not found → Av1an step skipped
+```
+
+Ubuntu 24.04 dropped the `vapoursynth` package entirely, never had an
+`av1an` package, and `ffms2` is now `libffms2-dev`. The whole apt path
+was dead. Did a from-source install instead.
+
+**VapourSynth version matters — R76 breaks av1an.** Built the latest
+release (R76) first; av1an then panicked at startup:
+
+```
+panicked at vapoursynth-0.5.1/src/vsscript/mod.rs:83:
+Failed to get VSScript API
+```
+
+`getVSScriptAPI()` returned null — confirmed with a bare C call, so it
+was VapourSynth, not the Rust crate. Root cause: the av1an `vapoursynth`
+crate (`vapoursynth-sys 0.5.0`) requests **VSScript API 4.1**; R76
+provides 4.3 and its `getVSScriptAPI` *rejects* the older 4.1 request
+(R76 broke backward-compat). Checked the tags:
+
+| Release | VSScript API minor | `getVSScriptAPI(4.1)` |
+|---|---|---|
+| R65, R68 | 1 | ok |
+| R70, R72 | 2 | ok |
+| R76 | 3 | **null** |
+
+Rebuilt with **R72** (VSScript API 4.2 — also the version this
+project's docs reference). `getVSScriptAPI(4.1)` then returns a valid
+pointer and av1an runs.
+
+**Other gotchas hit along the way:**
+- *Cython.* Ubuntu's Cython 3.0.8 generates code that fails against
+  Python 3.12's `PyLongObject` internals (`PyLong_SHIFT` undeclared).
+  Needs Cython ≥ 3.1 — `pip install -U Cython`.
+- *Build systems differ by tag.* R76 uses meson + a `mesonpy`
+  pip backend that installs everything as a Python package. R72 uses
+  autotools — traditional `/usr/local` layout, which is what av1an
+  expects anyway.
+- *Debian python path.* R72's autotools `make install` drops the
+  Python module in `/usr/local/lib/pythonX.Y/site-packages`; Debian
+  Python only searches `dist-packages`. Copy it across or `import
+  vapoursynth` fails → vsscript can't init → `vspipe` prints "Failed
+  to initialize VSScript".
+- *Linker vs loader.* av1an's `vapoursynth-sys` emits bare
+  `-lvapoursynth -lvapoursynth-script` with no search path. `ldconfig`
+  fixes runtime lookup but not link time — the build needs
+  `-L /usr/local/lib` (or pkg-config with a proper `Libs:` line).
+- *Rust version.* av1an 0.5.2 needs rustc ≥ 1.88; Ubuntu's cargo is
+  1.75. Installed rustup (got 1.95).
+- *FFMS2 plugin.* apt's `libffms2.so` exports `VapourSynthPluginInit2`
+  — it *is* a valid VapourSynth source plugin. Symlink it into
+  VapourSynth's autoload dir (`/usr/local/lib/vapoursynth`) and the
+  `ffms2` chunk method works.
+- *Encoders.* av1an drives encoder *binaries* directly, not ffmpeg.
+  x264/x265 come from apt. `SvtAv1EncApp` does **not** — apt's
+  `svt-av1` is v1.7, far too old for the libsvtav1* presets (need v4).
+  Until SVT-AV1 v4 is built from source, av1an can do x264/x265 but
+  not the AV1 presets; ab-av1 covers AV1 (ffmpeg's SVT-AV1 v4.1.0).
+
+Smoke-tested: av1an end-to-end (scene detect → FFMS2 chunking → parallel
+x265 → mkvmerge concat) succeeds. `install.sh` rewritten with an
+apt-aware path that builds VapourSynth R72 from source and installs
+av1an via rustup/cargo.
+
 ---
 
 ## Learnings
@@ -303,6 +459,15 @@ larger to compensate.
 - **NVENC quality drops fast above CRF ~36.** Sample-based prediction
   extrapolates badly from there. Set `--max-crf 36` for NVENC encoders
   in the catalog.
+- **ab-av1 has no `--ffmpeg` flag — it resolves `ffmpeg` from `PATH`.**
+  Detecting a preferred ffmpeg (e.g. a static `bin/` build) is useless
+  unless that directory is on the child's `PATH`. Spawn ab-av1 with an
+  env whose `PATH` is prepended, or it silently uses the distro ffmpeg
+  — which may link an old SVT-AV1 and lack the libvmaf filter (VMAF
+  probes then die with `No such filter: 'libvmaf'`).
+- **The same applies to av1an** — it shells out to `ffmpeg` by name
+  too. Anything that detects a binary by full path must still export
+  that path to subprocesses that look it up by name.
 
 ### libvmaf gotchas
 - **Windows absolute paths break libvmaf filter args** — the `:` in
@@ -311,6 +476,61 @@ larger to compensate.
 - **CUDA libvmaf rejects mixed pixel formats** between the two inputs.
   Do CPU-side `format=yuv420p` *before* `hwupload_cuda` for both
   inputs; the actual VMAF math still runs on the GPU after that.
+
+### Shell scripting under `set -o pipefail`
+- **`grep -q` is unsafe in a pipeline under `pipefail`.** It exits on
+  first match, SIGPIPEs the upstream producer (exit 141), and the
+  pipeline status becomes failure even though the *grep* succeeded.
+  Use `grep PATTERN >/dev/null` (or `grep -m1 PATTERN >/dev/null` if
+  you do want early termination — but consume the SIGPIPE outcome
+  deliberately).
+- **`set -o pipefail` interacts with every short-circuiting pipe stage,
+  not just the obvious ones.** `head -1`, `grep -q`, `tee` with a
+  failing reader — any consumer that closes early can flip the
+  pipeline's exit status to non-zero. Audit pipelines after enabling
+  pipefail.
+- **Commit executable bits explicitly.** Files added to git without
+  `+x` keep mode `0644` forever; `git update-index --chmod=+x` (or a
+  fresh `chmod +x` followed by `git add`) is the only fix. Symptoms
+  look like "this script won't run" until someone tries `bash ./x.sh`
+  and it works.
+
+### Static ffmpeg builds
+- **johnvansickle's static ffmpeg lacks libsvtav1.** It has libvmaf
+  but not the SVT-AV1 encoder. Fine for analysis-only tools, broken
+  for anything that needs to *produce* AV1. Use BtbN/FFmpeg-Builds GPL
+  release instead — it ships libsvtav1 + libvmaf + NVENC headers.
+- **BtbN nests binaries under `<extracted-dir>/bin/`.** Don't hardcode
+  the johnvansickle top-level layout when switching sources; `find
+  -type f -name ffmpeg` survives both.
+- **Validate static builds with a feature probe, not a version check.**
+  `ffmpeg -encoders | grep libsvtav1` is the truth; `ffmpeg -version`
+  tells you nothing about which encoders made it into the build.
+
+### VapourSynth / av1an install
+- **VapourSynth is no longer an apt package on Ubuntu 24.04.** Build
+  from source. dnf/pacman still ship it.
+- **Pin VapourSynth to R72 for av1an.** The av1an `vapoursynth` crate
+  requests VSScript API 4.1; R76+ rejects it (`getVSScriptAPI` returns
+  null → "Failed to get VSScript API" panic). R70–R72 (API minor 2)
+  accept it.
+- **Diagnose `getVSScriptAPI` failures with a bare C call.** It isolates
+  VapourSynth from the Rust binding instantly — link
+  `-lvapoursynth-script`, call `getVSScriptAPI(VS_MAKE_VERSION(4,1))`.
+- **Cython 3.0.x can't target Python 3.12** (`PyLong_SHIFT` undeclared
+  in generated code). Use Cython ≥ 3.1.
+- **autotools + Debian Python = wrong install dir.** `make install`
+  uses `site-packages`; Debian searches `dist-packages`. Copy the
+  module across.
+- **`ldconfig` fixes runtime linking, not link-time.** The build-time
+  linker only searches standard dirs + explicit `-L`. A lib in
+  `/usr/local/lib` still needs `-L /usr/local/lib` (or pkg-config) to
+  *link* against, even though ldconfig will *load* it fine.
+- **av1an drives encoder binaries, not ffmpeg.** It needs `x264`,
+  `x265`, `SvtAv1EncApp` etc. on PATH. apt's `svt-av1` (v1.x) is too
+  old for the libsvtav1* presets — build SVT-AV1 v4 from source.
+- **apt's `libffms2.so` is a valid VapourSynth plugin** (exports
+  `VapourSynthPluginInit2`) — no separate VS-plugin package needed.
 
 ### Docker / Arch
 - **Never `pacman -Syu` mid-build.** It will pull an ffmpeg major
