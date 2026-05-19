@@ -16,20 +16,20 @@ A Windows-targeted, browser-based video compression demo that takes any ffmpeg-r
 
 ```bash
 # Linux (one-time)
-./install.sh                    # static ffmpeg + ab-av1 -> bin/, venv + deps
-./install.sh --with-av1an       # also install Av1an + VapourSynth
+./install.sh                    # ffmpeg + ab-av1 + Av1an backend + venv + deps
+./install.sh --skip-av1an       # skip Av1an (no VapourSynth/SVT-AV1/Rust build)
 # Then:
 ./run.sh                        # 127.0.0.1:8000
 ./run.sh --host 0.0.0.0 --port 8765
 ```
 
 ```bash
-# Docker (multi-stage, ffmpeg + ab-av1 baked in)
+# Docker (multi-stage, ffmpeg + ab-av1 + Av1an baked in)
 docker compose up --build                                                  # CPU only
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build  # NVENC
 ```
 
-The Docker image deliberately omits Av1an (it would pull in VapourSynth + plugins). For the parallel/scene-detected backend, use the host install path with `--with-av1an`.
+The main image builds the Av1an backend from source (VapourSynth R72 + SVT-AV1 v4 + av1an) in a dedicated build stage — see `Dockerfile` stage 3. `install.sh` does the same on the host by default; both can be skipped (`--skip-av1an` / not at all in Docker).
 
 `install.sh` is idempotent and prefers a project-local static ffmpeg in `bin/` over whatever the distro shipped — distro ffmpeg packages frequently lack `libvmaf` or `libsvtav1`. `app/tools.py:_find_ffmpeg` checks `bin/` first, so the local copy always wins.
 

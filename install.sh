@@ -2,13 +2,13 @@
 # install.sh — one-shot setup for the video-compression-agent on Linux.
 #
 # Drops a static ffmpeg build (with libvmaf + libsvtav1 + NVENC) and the
-# ab-av1 binary into ./bin/, creates a Python venv, installs deps, and
-# optionally installs Av1an + VapourSynth. Re-run safely: every step is
-# idempotent.
+# ab-av1 binary into ./bin/, installs the Av1an backend (VapourSynth +
+# SVT-AV1 v4 + av1an), creates a Python venv, installs deps. Re-run
+# safely: every step is idempotent.
 #
 # Usage:
-#   ./install.sh                      # baseline: ffmpeg + ab-av1 + venv
-#   ./install.sh --with-av1an         # also install Av1an (parallel backend)
+#   ./install.sh                      # full setup: ffmpeg + ab-av1 + av1an + venv
+#   ./install.sh --skip-av1an         # skip the Av1an backend (faster, lighter)
 #   ./install.sh --skip-ffmpeg        # use system ffmpeg (must have libvmaf)
 #   ./install.sh --python python3.11  # pin a specific interpreter
 #   ./install.sh --help
@@ -16,13 +16,13 @@
 set -euo pipefail
 
 # ── Args ───────────────────────────────────────────────────────────────────
-WITH_AV1AN=0
+SKIP_AV1AN=0
 SKIP_FFMPEG=0
 PYTHON_BIN="${PYTHON:-python3}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --with-av1an)   WITH_AV1AN=1; shift ;;
+        --skip-av1an)   SKIP_AV1AN=1; shift ;;
         --skip-ffmpeg)  SKIP_FFMPEG=1; shift ;;
         --python)       PYTHON_BIN="$2"; shift 2 ;;
         -h|--help)
@@ -139,25 +139,27 @@ else
     printf '   %s(no NVIDIA GPU detected — software encoders only)%s\n' "$c_dim" "$c_off"
 fi
 
-# ── 4. Av1an (optional) ────────────────────────────────────────────────────
+# ── 4. Av1an backend (VapourSynth + SVT-AV1 v4 + av1an) ─────────────────────
+# Installed by default; pass --skip-av1an to opt out.
+#
 # Ubuntu/Debian dropped the `vapoursynth` package (not in noble's repos), and
 # there is no `av1an` apt package. So on apt systems we build VapourSynth from
 # source and install av1an via cargo. dnf/pacman still ship the packages.
 #
 # Encoder CLIs: av1an drives encoder *binaries* directly (not ffmpeg). x264 and
-# x265 come from apt; SVT-AV1's `SvtAv1EncApp` is NOT installed here — the apt
-# `svt-av1` is far too old for the libsvtav1* presets, which need v4. Build it
-# separately (or use the ab-av1 backend, which reaches SVT-AV1 v4 via ffmpeg).
+# x265 come from apt; SVT-AV1's `SvtAv1EncApp` is built from source — the apt
+# `svt-av1` is far too old for the libsvtav1* presets, which need v4.
 
 VS_TAG="${VAPOURSYNTH_TAG:-R72}"   # R72 = VSScript API 4.2; the av1an `vapoursynth`
                                    # crate requests 4.1, which R76+ rejects.
+SVTAV1_TAG="${SVTAV1_TAG:-v4.1.0}" # matches the SVT-AV1 the static ffmpeg links.
 
 install_av1an_apt() {
     local apt="sudo apt-get install -y --no-install-recommends"
     say "Installing av1an build deps + encoder CLIs via apt"
     # build-essential etc. for VapourSynth; x264/x265 + mkvtoolnix for av1an;
     # libffms2-dev ships a working VapourSynth source plugin.
-    $apt build-essential autoconf automake libtool pkg-config nasm git \
+    $apt build-essential autoconf automake libtool pkg-config nasm git cmake \
          cython3 python3-dev python3-pip libzimg-dev libffms2-dev \
          mkvtoolnix x264 x265 || { warn "apt deps install failed"; return 1; }
     # Ubuntu's Cython (3.0.x) emits code incompatible with Python 3.12's
@@ -188,6 +190,29 @@ build_vapoursynth_source() {
     local ffms2; ffms2=$(find /usr/lib -name 'libffms2.so*' 2>/dev/null | head -1)
     [[ -n "$ffms2" ]] && sudo ln -sf "$ffms2" /usr/local/lib/vapoursynth/libffms2.so
     command -v vspipe >/dev/null && ok "VapourSynth installed ($(vspipe --version 2>&1 | head -1))"
+}
+
+build_svtav1() {
+    # av1an drives SvtAv1EncApp directly. apt's svt-av1 is v1.x — far too old
+    # for the libsvtav1* presets — so build v4 from the GitLab tag.
+    if command -v SvtAv1EncApp >/dev/null; then
+        ok "SvtAv1EncApp already present ($(SvtAv1EncApp --version 2>&1 | head -1))"
+        return 0
+    fi
+    command -v cmake >/dev/null || { warn "cmake not found — cannot build SVT-AV1"; return 1; }
+    local tmp; tmp=$(mktemp -d)
+    say "Building SVT-AV1 $SVTAV1_TAG from source (~3 min)"
+    git clone --quiet --depth 1 -b "$SVTAV1_TAG" \
+        https://gitlab.com/AOMediaCodec/SVT-AV1.git "$tmp/svt" \
+        || { warn "SVT-AV1 clone failed"; return 1; }
+    ( cd "$tmp/svt" \
+      && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+               -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DBUILD_APPS=ON \
+      && cmake --build build -j"$(nproc)" ) \
+        || { warn "SVT-AV1 build failed"; return 1; }
+    sudo install -m755 "$tmp/svt/Bin/Release/SvtAv1EncApp" /usr/local/bin/SvtAv1EncApp
+    rm -rf "$tmp"
+    ok "SvtAv1EncApp installed ($(SvtAv1EncApp --version 2>&1 | head -1))"
 }
 
 ensure_cargo() {
@@ -238,13 +263,14 @@ install_av1an_other_pm() {
     esac
 }
 
-if (( WITH_AV1AN )); then
-    if command -v apt-get >/dev/null; then
-        install_av1an_apt && build_vapoursynth_source
-        install_av1an_binary || warn "Av1an step incomplete — backend may be unavailable in the UI."
-    else
-        install_av1an_other_pm
-    fi
+if (( SKIP_AV1AN )); then
+    say "Skipping the Av1an backend (--skip-av1an)"
+elif command -v apt-get >/dev/null; then
+    install_av1an_apt && build_vapoursynth_source
+    build_svtav1       || warn "SVT-AV1 build failed — av1an's AV1 presets will be unavailable."
+    install_av1an_binary || warn "Av1an step incomplete — backend may be unavailable in the UI."
+else
+    install_av1an_other_pm
 fi
 
 # ── 5. Python virtualenv + dependencies ────────────────────────────────────
