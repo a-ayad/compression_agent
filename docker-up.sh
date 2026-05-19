@@ -3,8 +3,7 @@
 # video-compression-agent container with the right compose stack.
 #
 # Decision flow:
-#   * Always builds Dockerfile.av1an  (parallel/scene-detected backend +
-#     all software encoders + libvmaf inside the image).
+#   * Builds the main image — Av1an + ab-av1 backends are both baked in.
 #   * If an NVIDIA GPU is reachable AND nvidia-container-toolkit is set up,
 #     also layers in docker-compose.gpu.yml so ffmpeg's NVENC encoders
 #     have actual GPU access at runtime.
@@ -18,7 +17,7 @@
 #   ./docker-up.sh --cpu        # force CPU build even if a GPU is present
 #   ./docker-up.sh --rebuild    # docker compose build --no-cache before up
 #   ./docker-up.sh --detect     # report findings, don't build/start
-#   ./docker-up.sh --port 8765  # bind a different host port (default 8010)
+#   ./docker-up.sh --port 8765  # bind a different host port (default 8000)
 #
 # The standalone CUDA VMAF service is its own app — bring it up via
 # ./vmaf-up.sh. The two stacks are independent.
@@ -31,7 +30,7 @@ cd "$ROOT"
 
 # ── Args ───────────────────────────────────────────────────────────────────
 ASSUME_YES=0; FORCE_CPU=0; REBUILD=0; DETECT_ONLY=0
-HOST_PORT=8010
+HOST_PORT=8000
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y|--yes)    ASSUME_YES=1; shift ;;
@@ -210,7 +209,7 @@ else
 fi
 
 # ── Build & start ──────────────────────────────────────────────────────────
-COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.av1an.yml)
+COMPOSE_ARGS=(-f docker-compose.yml)
 (( USE_GPU )) && COMPOSE_ARGS+=(-f docker-compose.gpu.yml)
 
 # Wire the requested host port through to the override.
@@ -227,16 +226,16 @@ docker compose "${COMPOSE_ARGS[@]}" up -d --build
 
 # ── Post-flight ────────────────────────────────────────────────────────────
 sleep 3
-if ! docker ps --filter name=video-compression-agent-av1an --format '{{.Status}}' \
+if ! docker ps --filter name=video-compression-agent --format '{{.Status}}' \
         | grep -q '^Up'; then
-    docker logs --tail 40 video-compression-agent-av1an >&2 || true
+    docker logs --tail 40 video-compression-agent >&2 || true
     die "Container failed to start. See logs above."
 fi
 
 if (( USE_GPU )); then
     say "Verifying GPU is visible inside the container"
-    if docker exec video-compression-agent-av1an nvidia-smi -L >/dev/null 2>&1; then
-        ok "GPU passthrough working: $(docker exec video-compression-agent-av1an nvidia-smi -L | head -1)"
+    if docker exec video-compression-agent nvidia-smi -L >/dev/null 2>&1; then
+        ok "GPU passthrough working: $(docker exec video-compression-agent nvidia-smi -L | head -1)"
     else
         warn "nvidia-smi inside container failed — NVENC encodes will fall back to error."
     fi
@@ -256,7 +255,7 @@ EOF
     printf '  Tailscale: %shttp://%s:%s%s\n' "$c_blue" "$TS_IP" "$HOST_PORT" "$c_off"
 cat <<EOF
 
-  Logs:      docker logs -f video-compression-agent-av1an
+  Logs:      docker logs -f video-compression-agent
   Stop:      docker compose ${COMPOSE_ARGS[*]} down
 
   CUDA VMAF service is a separate app — start it with:

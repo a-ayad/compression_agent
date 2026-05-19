@@ -4,7 +4,8 @@ services:
     image: video-compression-agent:latest
     container_name: video-compression-agent
     ports:
-      - "8000:8000"
+      # Host port overridable via VCA_HOST_PORT (docker-up.sh --port).
+      - "${VCA_HOST_PORT:-8000}:8000"
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
